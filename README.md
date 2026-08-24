@@ -4,8 +4,38 @@ Scans 119 public job boards every 4 hours, scores each posting against a profile
 configure, and pushes anything relevant to Telegram. Self-hosted, no API keys, no paid
 services — GitHub Actions is the only runtime it needs.
 
-This is a sanitised template. The scoring profile in `jobs-radar.workflow.json` encodes one
-person's job search; **replace it with your own** before running (see *Scoring* below).
+## This is a template — you have to build your own version
+
+Cloning this and pressing run will get you somebody else's shortlist. Two things are
+yours to create before it is useful:
+
+**1. Your own flow.** `jobs-radar.workflow.json` is an n8n workflow export. Import it into
+your own n8n instance (`http://localhost:5678` in Docker is enough) and it becomes an
+editable flow you own — or skip n8n entirely and run `radar.mjs`, which executes the exact
+same Code-node scripts from that same JSON file. Either way the workflow is yours to
+change: sources, schedule, threshold, delivery channel.
+
+**2. Your own filters, derived from your own CV.** The scoring node shipped here encodes
+one candidate's search — senior/lead product management, B2B SaaS and AI products, EU-based,
+with penalties for on-site work and for languages that candidate does not speak. **None of
+that is logic; all of it is configuration**, and none of it fits you.
+
+Sit down with your CV and rewrite it against what you actually have and actually want:
+
+- the **titles** at, above and below your level (`TITLE_LEAD`, `TITLE_SENIOR`, `TITLE_BASE`)
+- the **topics** worth weighting in a job title (`TITLE_AI`, `TITLE_PLATFORM`, `TITLE_KW`)
+- the **description keywords** that map to real evidence you can point at in an interview —
+  not everything you find interesting (`KW`)
+- the **title shapes to reject outright**: wrong level, wrong function (`TITLE_BLOCK`)
+- your **geography and work arrangement** — which countries and cities, remote vs hybrid vs
+  on-site, and where you need no work-permit conversation
+- the **languages you do not work in**, so roles run in them score down
+
+`SETUP.md` walks through all five steps, including the Telegram bot and the secrets.
+
+The rest of the repo — 17 ATS integrations, the normalisation layer, the aggregator-distrust
+rule for location claims, the staleness penalty, the board-health report — is generic and
+works unchanged.
 
 ## Where it runs
 
