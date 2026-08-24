@@ -1,0 +1,71 @@
+name: Jobs Radar
+
+on:
+  # The schedule is commented out on purpose: this is a template, and a scheduled
+  # run without TELEGRAM_TOKEN / TELEGRAM_CHAT_ID set would fail every 4 hours.
+  # Add your secrets (see SETUP.md), then uncomment.
+  # schedule:
+  #   # Every 4 hours. GitHub cron is UTC and can lag a few minutes under load.
+  #   - cron: '0 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Score and print without sending to Telegram'
+        type: boolean
+        default: false
+      threshold:
+        description: 'Score cut-off'
+        default: '30'
+      max_per_run:
+        description: 'Cap on notifications (raise it on a dry run to see the whole queue)'
+        default: '12'
+
+concurrency:
+  group: jobs-radar
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # needed to commit seen.json back
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run radar
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRY_RUN: ${{ inputs.dry_run == true && '1' || '0' }}
+          THRESHOLD: ${{ inputs.threshold || '30' }}
+          MAX_PER_RUN: ${{ inputs.max_per_run || '12' }}
+        run: node radar.mjs
+
+      - name: Persist dedup state and health report
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          if git diff --quiet -- seen.json status.json STATUS.md; then
+            echo "nothing changed, nothing to commit"
+            exit 0
+          fi
+          git config user.name  "jobs-radar[bot]"
+          git config user.email "jobs-radar@users.noreply.github.com"
+          git add seen.json status.json STATUS.md
+          git commit -m "chore: update seen postings + status"
+          git push
+
+      - name: Fail the run if too many boards are down
+        if: always()
+        run: |
+          node -e '
+            const s = require("./status.json");
+            const { ok, sources, down } = s.totals;
+            console.log(`${ok}/${sources} boards up, ${down} down`);
+            // A handful of boards 404 on any given day; a third of them going
+            // dark at once means something systemic, and that should be loud.
+            if (down > sources / 3) { console.error("too many boards down"); process.exit(1); }
+          '

@@ -1,0 +1,4 @@
+{
+ "seen": {},
+ "_why": "URL -> first-seen epoch ms. Entries older than the dedup window are pruned each run."
+}
