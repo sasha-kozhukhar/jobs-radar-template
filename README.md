@@ -225,6 +225,16 @@ not the information:
 4. **Retire the whole group in `seen`** via `cloneUrls`, or the sibling URLs
    arrive on the next run looking like new roles.
 
+**The title is not a stable role key.** Grouping on the raw title cannot see that
+`Senior Product Manager (100% Remote within Spain)` and `… (100% Remote within
+Poland)` are one role — and clones that happen to share a single title will hide the
+problem from your tests. Titles are therefore stripped of bracketed, pipe-tail and
+trailing-dash segments that only qualify **where or how** the job is done: locations,
+`remote`/`hybrid`, `100% within X`, and gendered German tags like `(m/w/d)` /
+`(f/m/x)`. **Only those** — over-stripping is the opposite failure, merging
+`(XDR & Exposure Management)` with `(Strategic Account Interactions)` into one role.
+Both directions are asserted in `test_collapse.mjs`.
+
 **Cross-source disagreement is treated as a lie, not a tie.** When the same role
 arrives from two feeds with different locations, one feed is wrong, and it is
 reliably the *optimistic* one. A role listed by one aggregator as "United Kingdom"
