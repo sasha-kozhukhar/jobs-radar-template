@@ -73,5 +73,52 @@ check('two different titles at one employer -> 2 notifications', out.length===2,
 check('output stays sorted by score desc',
   out.every((x,i,a)=>i===0||a[i-1].json.score>=x.json.score));
 
+// --- 6. Location baked into the TITLE ---------------------------------------
+out = collapse([
+  j({source:'ashby', company:'example-health',
+     title:'AI Senior Product Manager, Patient Engagement (100% Remote within Spain)',
+     location:'Barcelona', url:'ashby/es', score:60,
+     reasons:['senior title','AI in title','remote EU/EMEA','Spain-eligible']}),
+  j({source:'ashby', company:'example-health',
+     title:'AI Senior Product Manager, Patient Engagement (100% Remote within Poland)',
+     location:'Warsaw', url:'ashby/pl', score:53,
+     reasons:['senior title','AI in title','remote EU/EMEA']}),
+]);
+check('title-embedded location: variants collapse', out.length===1, `got ${out.length}`);
+check('title-embedded location: kept the reachable one', out[0]?.json.location==='Barcelona', out[0]?.json.location);
+
+out = collapse([
+  j({source:'ashby', company:'example-health', title:'Senior Clinical Product Lead | 100% Remote within Europe',
+     location:'Barcelona', url:'p/1', score:40, reasons:['senior title','EU location']}),
+  j({source:'ashby', company:'example-health', title:'Senior Clinical Product Lead | 100% Remote within Poland',
+     location:'Warsaw', url:'p/2', score:33, reasons:['senior title','EU location']}),
+]);
+check('pipe-tail location qualifier collapses too', out.length===1, `got ${out.length}`);
+
+out = collapse([
+  j({source:'arbeitnow', company:'example-energy', title:'Senior Product Manager Service Cockpit (m/w/d)',
+     location:'Berlin', url:'a/1', score:33, reasons:['senior title','EU location']}),
+  j({source:'personio', company:'example-energy', title:'Senior Product Manager Service Cockpit (f/m/x)',
+     location:'Berlin', url:'a/2', score:33, reasons:['senior title','EU location']}),
+]);
+check('gendered job-tag variants collapse', out.length===1, `got ${out.length}`);
+
+// CRITICAL guard: a MEANINGFUL parenthetical must NOT be stripped.
+out = collapse([
+  j({source:'greenhouse', company:'example-corp', title:'Principal Product Manager (XDR & Exposure Management) - Security Solutions',
+     location:'Spain', url:'g/1', score:52, reasons:['lead/staff title','Spain-eligible']}),
+  j({source:'greenhouse', company:'example-corp', title:'Principal Product Manager (Strategic Account Interactions) - Security Solutions',
+     location:'Spain', url:'g/2', score:52, reasons:['lead/staff title','Spain-eligible']}),
+]);
+check('meaningful parenthetical is NOT stripped -> stays 2 roles', out.length===2, `got ${out.length}`);
+
+out = collapse([
+  j({source:'greenhouse', company:'example-corp', title:'Product Manager - Core AI',
+     location:'Utrecht', url:'g/3', score:42, reasons:['PM title','EU location']}),
+  j({source:'greenhouse', company:'example-corp', title:'Product Manager - Billing',
+     location:'Utrecht', url:'g/4', score:40, reasons:['PM title','EU location']}),
+]);
+check('meaningful trailing dash segment survives -> stays 2 roles', out.length===2, `got ${out.length}`);
+
 console.log(fail? `\n${fail} FAILURE(S)` : '\nall checks passed');
 process.exit(fail?1:0);

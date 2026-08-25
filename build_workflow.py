@@ -602,6 +602,45 @@ COLLAPSE = r"""
 // Group scored postings into one entry per real role.
 const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+// Plenty of employers bake the location into the title, which defeats grouping on
+// the title alone -- "Senior Product Manager (100% Remote within Spain)" and
+// "... (100% Remote within Poland)" are one role and two strings, and they will go
+// out as two messages unless the qualifier is removed first.
+//
+// So drop bracketed / pipe / trailing-dash segments that only qualify WHERE or HOW
+// the job is done -- but ONLY those. A meaningful parenthetical must survive, or
+// this causes the opposite failure: "(XDR & Exposure Management)" and "(Strategic
+// Account Interactions)" would merge into one role.
+const LOC_TAG = new RegExp([
+  'remote|hybrid|on.?site|onsite|within|relocation|\\d+ ?%',
+  '[mfwdx](?:\\s*\\/\\s*[mfwdx]){1,2}',            // (m/w/d), (f/m/x), (d/f/m)
+  'emea|apac|latam|europe|european|worldwide|anywhere|global',
+  'spain|poland|portugal|ireland|greece|germany|france|italy|netherlands|belgium',
+  'sweden|denmark|norway|finland|switzerland|austria|czech|romania|bulgaria',
+  'hungary|estonia|latvia|lithuania|croatia|serbia|slovakia|slovenia|turkey',
+  'united kingdom|england|scotland|wales|\\buk\\b|\\bus\\b|\\busa\\b',
+  'united states|canada|israel|singapore|india|brazil|mexico|japan|australia',
+  'madrid|barcelona|valencia|malaga|warsaw|krakow|berlin|munich|hamburg|cologne',
+  'frankfurt|paris|london|manchester|dublin|amsterdam|utrecht|rotterdam|lisbon',
+  'porto|milan|rome|turin|vienna|zurich|geneva|stockholm|copenhagen|oslo',
+  'helsinki|prague|budapest|bucharest|athens|sofia|tallinn|riga|vilnius|zagreb',
+].join('|'), 'i');
+
+const stripLocationTags = (title) => {
+  let t = (title || '');
+  // Bracketed segments: keep unless the segment is only a location/work-model tag.
+  t = t.replace(/[([]([^)\]]*)[)\]]/g, (m, inner) => (LOC_TAG.test(inner) ? ' ' : m));
+  // Pipe-separated tail segments, e.g. "Role | 100% Remote within Europe".
+  const pipes = t.split('|');
+  if (pipes.length > 1) {
+    t = [pipes[0], ...pipes.slice(1).filter((seg) => !LOC_TAG.test(seg))].join(' ');
+  }
+  // A trailing dash segment, and only the trailing one -- "- Security Solutions"
+  // has to survive while "- Berlin" does not.
+  t = t.replace(/\s[-\u2013\u2014]\s([^-\u2013\u2014]*)$/, (m, tail) => (LOC_TAG.test(tail) ? ' ' : m));
+  return t;
+};
+
 // Rank by what the configured profile can actually take, not by raw score: an
 // eligible clone at 45 beats an unreachable clone at 45, which score alone cannot
 // express. EXAMPLE TIERS -- these strings must match the reasons your own
@@ -618,7 +657,7 @@ const eligibility = (j) => {
 const groups = new Map();
 for (const item of $input.all()) {
   const j = item.json;
-  const key = norm(j.company) + '|' + norm(j.title);
+  const key = norm(j.company) + '|' + norm(stripLocationTags(j.title));
   if (!groups.has(key)) groups.set(key, []);
   groups.get(key).push(j);
 }
