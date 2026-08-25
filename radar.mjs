@@ -22,7 +22,7 @@ const STATUS_MD = path.join(HERE, 'STATUS.md');
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT = process.env.TELEGRAM_CHAT_ID;
 const DRY = process.env.DRY_RUN === '1';
-const THRESHOLD = Number(process.env.THRESHOLD || 30);
+const THRESHOLD = Number(process.env.THRESHOLD || 48);
 const MAX_PER_RUN = Number(process.env.MAX_PER_RUN || 12);
 
 if (!DRY && (!TOKEN || !CHAT)) {

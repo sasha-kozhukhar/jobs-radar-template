@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_PLACEHOL
 # plain "Senior Product Manager" roles entirely. 30 = senior title (24) + any
 # positive geo signal (>=7), while a non-senior "Product Manager" (12) still
 # cannot pass on title + geo alone.
-SCORE_THRESHOLD = 30
+SCORE_THRESHOLD = 48
 
 # ---------------------------------------------------------------- source list
 BUILD_SOURCES = r"""
@@ -90,8 +90,12 @@ const getro = [
 
 const out = [];
 for (const org of greenhouse) {
+  // `?content=true` is not optional: without it Greenhouse's list endpoint omits the
+  // `content` key altogether, so every posting from these boards arrives with NO
+  // description and can only score on title and location. Cost: a large board's
+  // response goes from ~330 KB to ~5 MB.
   out.push({ json: { kind: 'greenhouse', company: org,
-    url: `https://boards-api.greenhouse.io/v1/boards/${org}/jobs` } });
+    url: `https://boards-api.greenhouse.io/v1/boards/${org}/jobs?content=true` } });
 }
 for (const org of ashby) {
   out.push({ json: { kind: 'ashby', company: org,
@@ -191,7 +195,11 @@ responses.forEach((resp, i) => {
       title: strip(o.title),
       location: strip(o.location) || 'n/a',
       url: o.url,
-      description: strip(o.description).slice(0, 2500),
+      // 2500 cuts most postings off inside their "About us" section, so the
+      // requirements -- where standards, language demands and knockout conditions live
+      // -- are never read. Measured on one board: 37/37 descriptions were longer than
+      // 2500, median 8,188.
+      description: strip(o.description).slice(0, 12000),
       postedAt: o.postedAt || null,
     });
   };
@@ -453,6 +461,31 @@ const KW = [
 ];
 const KW_CAP = 26;
 
+// Credentials that are genuinely SCARCE in the PM pool, scored OUTSIDE KW_CAP for the
+// same reason the title bonuses are: these are not name-dropped. Every tech posting
+// says "AI" somewhere, which is why description keywords are capped — but a JD that
+// says "EU MDR" or "ISO 14971" is naming something almost no product manager can
+// answer, and the few who can are worth more than a keyword match. If the
+// configured profile holds a scarce credential, keep it OUT of the capped bucket, or
+// the roles that specifically ask for the rarest thing on the CV will rank
+// no higher than the roles that ask for nothing in particular.
+// EXAMPLE GROUP -- replace these terms with whatever is scarce about your own profile.
+//
+// Deliberately absent: GDPR and HIPAA. They appear in the privacy notice at the
+// bottom of half the postings in Europe, so they measure boilerplate, not the role.
+const SCARCE = [
+  [/eu mdr|mdr 2017\/745|\bivdr\b/i, 12, 'medical-device regulation'],
+  [/iso ?14971|iec ?62366|iec ?62304|iso ?13485|510\(k\)|fda (submission|clearance|approval|requirement)/i, 12, 'medtech standards'],
+  [/medical device|clinical (software|workflow|documentation|safety|validation)|regulatory (documentation|submission|affairs|compliance)/i, 8, 'regulated medtech'],
+  [/\bpatient|clinician|\bdoctor|\bclinic\b|\behr\b|\bemr\b|practice management|health ?tech|digital health/i, 5, 'healthcare domain'],
+  [/public sector|govtech|\bgovernment\b|sovereign|smart city|critical infrastructure|defence|defense/i, 6, 'public sector / sovereign'],
+  [/eu ai act|regulated (environment|industry|data)|audit(ability|able)|traceability/i, 5, 'regulated environment'],
+];
+// Capped too, just far higher than the boilerplate bucket: a genuine medtech-regulatory
+// JD should be able to clear the threshold on this signal alone, but not saturate.
+const SCARCE_CAP = 24;
+
+
 // Title-level topic bonuses (these are real signal, not boilerplate).
 const TITLE_KW = [
   [/\bai\b|artificial intelligence|genai|\bllm\b/i, 18, 'AI in title'],
@@ -460,6 +493,10 @@ const TITLE_KW = [
   [/\bplatform\b|infrastructure/i, 10, 'platform in title'],
   [/governance|compliance|trust|security/i, 8, 'governance in title'],
   [/\bapi(s)?\b|integration(s)?\b|ecosystem/i, 7, 'API/ecosystem in title'],
+  // Same reasoning as SCARCE below: a health or public-sector title is a much stronger
+  // match for a health / public-sector profile than a generic one, and it is never boilerplate in a title.
+  [/health|clinical|medical|patient|care\b|\bmedtech\b/i, 10, 'health in title'],
+  [/public sector|government|govtech|sovereign|defence|defense/i, 8, 'public sector in title'],
 ];
 
 // Titles that are PM-shaped but off-track for the configured profile.
@@ -469,6 +506,11 @@ const TITLE_BLOCK = [
   [/\bcounsel\b|attorney|paralegal|\blegal\b/i, 'legal'],
   [/account executive|\bsales\b|recruiter|customer success|support engineer|solutions engineer/i, 'non-PM'],
   [/marketing|growth marketing|brand|content strateg/i, 'marketing'],
+  [/\bintern\b|contract recruiter|localization/i, 'other'],
+  // "Staff AI Product Analyst, Product Management" cleared the PM gate on the trailing
+  // words and scored 70 once descriptions were switched on. An analyst title ending in the words
+  // "Product Management" is still not a PM role.
+  [/product analyst|data analyst|business analyst|analytics engineer/i, 'analyst'],
   [/\bintern\b|contract recruiter|localization/i, 'other'],
 ];
 
@@ -522,6 +564,19 @@ for (const item of $input.all()) {
     reasons.push(...kwHits);
   }
 
+  // Scarce credentials: own bucket, own cap, checked against title AND description so
+  // a role is not missed just because the standard is named in the requirements list.
+  let scarce = 0;
+  const scarceHits = [];
+  for (const [re, pts, label] of SCARCE) {
+    if (re.test(desc) || re.test(title)) { scarce += pts; scarceHits.push(label); }
+  }
+  if (scarce > 0) {
+    score += Math.min(scarce, SCARCE_CAP);
+    reasons.push(...scarceHits);
+  }
+
+
   // Geography, judged on the location field only.
   //
   // WeWorkRemotely is not trustworthy here: it labels Coinbase and Stripe roles
@@ -562,6 +617,18 @@ for (const item of $input.all()) {
   if (/fluent (in )?(german|deutsch|french|dutch|italian)|native (german|french)/i.test(desc)) {
     score -= 18; reasons.push('-other language');
   }
+
+  // -40, not a smaller number, because it has to survive the health boost that put the
+  // role near the top in the first place: a Clinical Product Lead scored 94 raw
+  // (health in title +10, medical-device regulation +12, regulated medtech +8,
+  // healthcare domain +5) while asking for a medical degree. Deliberately a penalty and
+  // not a drop -- "licensed clinicians" appears in plenty of JDs that do not require one
+  // of the candidate, and a wrong drop is invisible, which is the failure mode this repo
+  // most wants to avoid. A labelled role low in the list costs one glance.
+  if (/medical degree|practi[sc]ing medicine|active licensure|clinical licensure|registered nurse/i.test(desc)) {
+    score -= 40; reasons.push('-clinical credential required');
+  }
+
 
   // Posting age. One application went to a role that had been open for six weeks and came back
   // "position filled" two days later — a posting live for 6+ weeks is

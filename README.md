@@ -145,7 +145,7 @@ Run manually  ─┴→ Build Source List → Fetch Board → Normalize Jobs
   posting is announced once, and retires a collapsed role's sibling `cloneUrls`
   along with it. Caps each run at 12 messages and marks **only what actually
   goes out**.
-- **Relevant enough?** — threshold **30** (lowered from 48 on 2026-08-17).
+- **Relevant enough?** — threshold **48**. See "Read the whole posting" below before lowering it.
 - **Send to Telegram** — via your own bot (create one with `@BotFather`). Token and chat id come from the
   `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` environment variables — never committed.
 
@@ -177,6 +177,65 @@ Points:
   application went out to a role open since six weeks prior and came back "position filled"
   two days later. Penalty-only, so nothing is pushed over the threshold just for being new.
   a posting live 6+ weeks is likely already in final rounds.
+
+### Scarce credentials belong outside the keyword cap
+
+Description keywords are capped at +26 because every tech posting name-drops "AI". But if the
+configured profile holds something genuinely **scarce** — a regulatory credential, a licence,
+a domain almost nobody in the applicant pool can answer — that term is not name-dropping, and
+burying it in the capped bucket means the roles asking for the rarest thing on the CV rank no
+higher than the roles asking for nothing in particular.
+
+There is a `SCARCE` group scored **outside** `KW_CAP` with its own `SCARCE_CAP = 24`, checked
+against title **and** description, plus matching title bonuses. The shipped terms are an
+**example** (medical-device regulation, medtech standards, healthcare, public sector /
+sovereign) — replace them with whatever is scarce about your own profile.
+
+Two things learned wiring it up:
+
+- **Exclude privacy acronyms.** GDPR and HIPAA appear in the application privacy notice at the
+  bottom of half of Europe's postings. They measure boilerplate, not the role.
+- **A domain match is not eligibility.** The health boost promotes roles that require a
+  clinical credential; hence `-clinical credential required` (−40, large enough to survive the
+  boost that promoted the role). It is a **penalty, not a drop** — "licensed clinicians"
+  appears in plenty of JDs that do not demand one of the candidate, and a wrong drop is
+  invisible, which is the worst failure mode a radar has. A labelled role low in the list costs
+  one glance.
+
+Also blocked: `product analyst` and friends. "Staff AI Product Analyst, **Product Management**"
+clears a naive PM-title gate on its trailing words.
+
+Calibrate against **labelled** roles, not by feel: score a handful you already judged good and
+bad, and check the ordering. `node test_scoring.mjs` asserts the whole group, no network.
+
+### Read the whole posting
+
+Two defaults that quietly cost half the corpus, worth checking in any fork of this:
+
+**1. Greenhouse needs `?content=true`.** Its list endpoint omits the `content` key entirely
+unless asked — not truncated, absent. Without it, every Greenhouse posting scores on title and
+location alone, so description keywords, language gates and the US-only hint are all dead for
+those boards. Here that was 34 boards and ~47% of everything fetched. Cost of the fix: a large
+board's response goes from ~330 KB to ~5 MB.
+
+**2. A 2,500-character description cap lands inside the "About us" section.** Requirements —
+standards, language demands, knockout conditions — live in the second half. Measured on one
+board: 37 of 37 descriptions were longer than 2,500, median 8,188. Now 12,000.
+
+**Both change what the threshold means.** With half the corpus unable to score a single keyword
+hit, a threshold of 48 was unreachable and had to be lowered to 30; with descriptions actually
+present the distribution moves up about 20 points (`>=50` went from 3 postings to 55 on one
+4,609-posting sample), so 48 becomes meaningful again.
+
+**One asymmetry before you retune.** The fix lifts ATS boards and leaves **aggregator** feeds
+(arbeitnow, jobicy, himalayas, remoteok, …) exactly where they were — those always returned
+descriptions. A single global threshold therefore cuts hardest into the half that was always
+healthy. On a live dry run right after the change: new postings above 48 = 1, above 40 ≈ 5,
+above 35 ≈ 12, above 30 = 18.
+
+**And change it in both places.** `radar.yml` pins `THRESHOLD` as an env var *and* declares a
+`workflow_dispatch` input with its own default — **the input default wins**, so editing
+`radar.mjs` or the env line alone changes nothing.
 
 ### Two corrections made after the first live day
 
@@ -266,6 +325,7 @@ cd ~/Desktop/cv/n8n
 python3 build_workflow.py
 node test_pipeline.mjs              # dry run: counts + top 15, sends nothing
 node test_collapse.mjs              # unit-tests the clone collapsing, no network
+node test_scoring.mjs               # unit-tests the scarce-credential scoring, no network
 node test_pipeline.mjs --notify 3   # also pushes top 3 to Telegram
 
 docker cp jobs-radar.workflow.json n8n-local:/tmp/jobs-radar.json

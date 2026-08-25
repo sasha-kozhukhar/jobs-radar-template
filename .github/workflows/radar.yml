@@ -15,7 +15,7 @@ on:
         default: false
       threshold:
         description: 'Score cut-off'
-        default: '30'
+        default: '48'
       max_per_run:
         description: 'Cap on notifications (raise it on a dry run to see the whole queue)'
         default: '12'
@@ -41,7 +41,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DRY_RUN: ${{ inputs.dry_run == true && '1' || '0' }}
-          THRESHOLD: ${{ inputs.threshold || '30' }}
+          THRESHOLD: ${{ inputs.threshold || '48' }}
           MAX_PER_RUN: ${{ inputs.max_per_run || '12' }}
         run: node radar.mjs
 
