@@ -585,6 +585,90 @@ out.sort((a, b) => b.json.score - a.json.score);
 return out;
 """
 
+# ------------------------------------------------------------------ collapse
+# One employer posting one role across ten countries is one decision, not ten
+# notifications. This is common and it is expensive: a single employer publishing
+# two roles as 19 country clones can fill a whole MAX_PER_RUN batch, pushing
+# everything else to the next run -- silently, because the cap does not announce
+# itself.
+#
+# The naive fix -- keep the best-scoring clone, drop the rest -- is wrong. Clones
+# are frequently NOT interchangeable: the same role is often country-locked with a
+# different salary band per country, and sometimes only one clone is reachable
+# without a work-authorisation fight. Dropping the wrong ones can hide the only
+# clone worth applying to. So this collapses the *notification*, not the
+# information: it picks the reachable variant and names the others in the message.
+COLLAPSE = r"""
+// Group scored postings into one entry per real role.
+const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// Rank by what the configured profile can actually take, not by raw score: an
+// eligible clone at 45 beats an unreachable clone at 45, which score alone cannot
+// express. EXAMPLE TIERS -- these strings must match the reasons your own
+// "Score vs Profile" geography rules emit. Edit alongside that profile.
+const eligibility = (j) => {
+  const r = (j.reasons || []).join(' ');
+  if (/Spain named|Spain-eligible/.test(r)) return 4;   // your home country
+  if (/remote EU\/EMEA/.test(r)) return 3;
+  if (/EU location/.test(r)) return 2;
+  if (/worldwide/.test(r)) return 1;
+  return 0;
+};
+
+const groups = new Map();
+for (const item of $input.all()) {
+  const j = item.json;
+  const key = norm(j.company) + '|' + norm(j.title);
+  if (!groups.has(key)) groups.set(key, []);
+  groups.get(key).push(j);
+}
+
+const out = [];
+for (const variants of groups.values()) {
+  if (variants.length === 1) { out.push({ json: variants[0] }); continue; }
+
+  const sources = [...new Set(variants.map((v) => v.source).filter(Boolean))];
+
+  // When the SAME role arrives from DIFFERENT sources with different locations,
+  // one source is lying -- and it is reliably the optimistic one. A role that one
+  // aggregator listed as "United Kingdom" and another as "Singapore" was
+  // Singapore-only in the employer's own posting, and the inflated copy scored 17
+  // points higher, which is enough to top a batch. Same failure as the
+  // WeWorkRemotely "Anywhere in the World" mislabels documented in the README.
+  // So on conflict, take the LEAST eligible read and say so, rather than letting a
+  // phantom lead the run.
+  const conflict = sources.length > 1
+    && new Set(variants.map(eligibility)).size > 1;
+
+  const ranked = [...variants].sort((a, b) => (conflict
+    ? eligibility(a) - eligibility(b) || a.score - b.score
+    : eligibility(b) - eligibility(a) || b.score - a.score));
+
+  const pick = ranked[0];
+  const others = ranked.slice(1);
+  const alts = [...new Set(others.map((v) => v.location).filter(Boolean))];
+
+  const reasons = [...(pick.reasons || [])];
+  if (conflict) {
+    reasons.push(`-sources disagree (${sources.join(' vs ')}) - took the strictest`);
+  }
+  if (alts.length) reasons.push(`+${alts.length} other location${alts.length > 1 ? 's' : ''}`);
+
+  out.push({ json: {
+    ...pick,
+    reasons: [...new Set(reasons)],
+    // Carried so the message can name them, and so dedup can retire the whole
+    // group at once -- otherwise the sibling URLs arrive on the next run looking
+    // like new roles.
+    alsoOpenIn: alts,
+    cloneUrls: others.map((v) => v.url).filter(Boolean),
+  } });
+}
+
+out.sort((a, b) => b.json.score - a.json.score);
+return out;
+"""
+
 # --------------------------------------------------------------------- dedup
 DEDUP = r"""
 // Remember what we already pushed so repeat runs stay quiet.
@@ -602,12 +686,23 @@ const fresh = [];
 for (const item of $input.all()) {
   const key = item.json.url;
   if (!key || store.seen[key]) continue;
-  store.seen[key] = now;
   fresh.push(item);
 }
 
 // Cap one run's notifications so a first run does not flood Telegram.
-return fresh.slice(0, 12);
+const batch = fresh.slice(0, 12);
+
+// Mark ONLY what actually goes out. Marking everything examined and then slicing
+// records the overflow as "sent", so anything past the cap is never announced at
+// all -- the opposite of "it waits for the next run".
+for (const item of batch) {
+  store.seen[item.json.url] = now;
+  // Retire the sibling country clones with it, or the rest of the group arrives
+  // one run later as if the role were new.
+  for (const u of item.json.cloneUrls || []) store.seen[u] = now;
+}
+
+return batch;
 """
 
 # ------------------------------------------------------------------ telegram
@@ -667,7 +762,10 @@ nodes = [
     node("Score vs Profile", "n8n-nodes-base.code", 2, [260, 300], {
         "mode": "runOnceForAllItems", "jsCode": SCORE.strip()
     }),
-    node("Drop Already Sent", "n8n-nodes-base.code", 2, [480, 300], {
+    node("Collapse Role Clones", "n8n-nodes-base.code", 2, [480, 300], {
+        "mode": "runOnceForAllItems", "jsCode": COLLAPSE.strip()
+    }),
+    node("Drop Already Sent", "n8n-nodes-base.code", 2, [920, 300], {
         "mode": "runOnceForAllItems", "jsCode": DEDUP.strip()
     }),
     node("Relevant enough?", "n8n-nodes-base.if", 2, [700, 300], {
@@ -684,7 +782,7 @@ nodes = [
         },
         "options": {},
     }),
-    node("Send to Telegram", "n8n-nodes-base.httpRequest", 4.2, [940, 220], {
+    node("Send to Telegram", "n8n-nodes-base.httpRequest", 4.2, [1140, 220], {
         "method": "POST",
         "url": f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         "sendBody": True,
@@ -696,6 +794,8 @@ nodes = [
             " text: $json.score + '/100  ' + $json.title"
             " + '\\n' + $json.company + '  ·  ' + $json.location"
             " + '\\n' + $json.reasons.join(' · ')"
+            " + (($json.alsoOpenIn || []).length"
+            "    ? '\\nalso open in: ' + $json.alsoOpenIn.join(', ') : '')"
             " + '\\n' + $json.url"
             " }) }}"
         ),
@@ -703,7 +803,7 @@ nodes = [
             "batching": {"batch": {"batchSize": 1, "batchInterval": 1500}},
         },
     }, onError="continueRegularOutput"),
-    node("Below threshold (no-op)", "n8n-nodes-base.noOp", 1, [940, 400], {}),
+    node("Below threshold (no-op)", "n8n-nodes-base.noOp", 1, [920, 460], {}),
 ]
 
 connections = {
@@ -712,10 +812,13 @@ connections = {
     "Build Source List": {"main": [[{"node": "Fetch Board", "type": "main", "index": 0}]]},
     "Fetch Board": {"main": [[{"node": "Normalize Jobs", "type": "main", "index": 0}]]},
     "Normalize Jobs": {"main": [[{"node": "Score vs Profile", "type": "main", "index": 0}]]},
-    "Score vs Profile": {"main": [[{"node": "Drop Already Sent", "type": "main", "index": 0}]]},
-    "Drop Already Sent": {"main": [[{"node": "Relevant enough?", "type": "main", "index": 0}]]},
+    "Score vs Profile": {"main": [[{"node": "Collapse Role Clones", "type": "main", "index": 0}]]},
+    "Collapse Role Clones": {"main": [[{"node": "Relevant enough?", "type": "main", "index": 0}]]},
+    # The threshold gate precedes dedup, so a below-threshold posting is never
+    # recorded as "sent" and can still be announced if a later tuning lifts it.
+    "Drop Already Sent": {"main": [[{"node": "Send to Telegram", "type": "main", "index": 0}]]},
     "Relevant enough?": {"main": [
-        [{"node": "Send to Telegram", "type": "main", "index": 0}],
+        [{"node": "Drop Already Sent", "type": "main", "index": 0}],
         [{"node": "Below threshold (no-op)", "type": "main", "index": 0}],
     ]},
 }

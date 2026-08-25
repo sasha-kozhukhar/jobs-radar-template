@@ -95,8 +95,8 @@ dedup stores, so running both means duplicate alerts.
 ```
 Every 4 hours ─┐
 Run manually  ─┴→ Build Source List → Fetch Board → Normalize Jobs
-                → Score vs Profile → Drop Already Sent → Relevant enough?
-                → Send to Telegram
+                → Score vs Profile → Collapse Role Clones → Relevant enough?
+                → Drop Already Sent → Send to Telegram
 ```
 
 - **Build Source List** — 119 endpoints: 34 Greenhouse boards,
@@ -139,8 +139,12 @@ Run manually  ─┴→ Build Source List → Fetch Board → Normalize Jobs
 - **Normalize Jobs** — one shape per source → `{source, company, title,
   location, url, description, postedAt}`.
 - **Score vs Profile** — see below.
+- **Collapse Role Clones** — one entry per real role, keyed on
+  `(company, normalized title)`. See "The clone problem" below.
 - **Drop Already Sent** — remembers URLs in n8n static data for 45 days, so a
-  posting is announced once. Caps each run at 12 messages.
+  posting is announced once, and retires a collapsed role's sibling `cloneUrls`
+  along with it. Caps each run at 12 messages and marks **only what actually
+  goes out**.
 - **Relevant enough?** — threshold **30** (lowered from 48 on 2026-08-17).
 - **Send to Telegram** — via your own bot (create one with `@BotFather`). Token and chat id come from the
   `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` environment variables — never committed.
@@ -196,6 +200,54 @@ Last live run (2026-08-20, 111 sources): 9 625 postings fetched → 379 with a P
 The two new platforms contributed 454 postings, 11 PM-titled, top of them a
 Senior Product Manager at Userlane in London scoring 36.
 
+### The clone problem
+
+One employer posting one role in ten countries is **one decision, not ten
+notifications**. It is common, and it is expensive: an employer publishing two
+roles as 19 country clones can fill a whole `MAX_PER_RUN` batch on its own,
+pushing everything else to the next run. The cap makes that failure silent.
+
+The naive fix — keep the best-scoring clone, drop the rest — is wrong, because
+clones are often **not interchangeable**. The same role is frequently
+country-locked with a different salary band per country, and sometimes only one
+clone is reachable without a work-authorisation fight. Dropping the wrong ones can
+hide the only clone worth applying to. So the node collapses the *notification*,
+not the information:
+
+1. **Group** by `(company, normalized title)`.
+2. **Pick the reachable variant**, ranking on eligibility first and score only as
+   a tie-break: `home country > remote EU/EMEA > EU location > worldwide >
+   everything else`. An eligible clone at 45 beats an unreachable one at 45, which
+   raw score cannot express. **The tier strings are example config** — they must
+   match the reasons your own geography rules emit.
+3. **Keep the alternatives in the message** — `also open in: Poland, Portugal,
+   Ireland, …` — so a fallback stays visible if the picked one closes.
+4. **Retire the whole group in `seen`** via `cloneUrls`, or the sibling URLs
+   arrive on the next run looking like new roles.
+
+**Cross-source disagreement is treated as a lie, not a tie.** When the same role
+arrives from two feeds with different locations, one feed is wrong, and it is
+reliably the *optimistic* one. A role listed by one aggregator as "United Kingdom"
+and by another as "Singapore" was Singapore-only in the employer's own posting —
+and the inflated copy scored **17 points higher**, enough to top the batch. Same
+failure mode as the WeWorkRemotely mislabels below. So on conflict the node keeps
+the **least** eligible read and says `-sources disagree (a vs b) - took the
+strictest` in the message. Useful side effect: two sources disagreeing becomes a
+cheap automatic trigger for "open the employer's own board before believing
+either".
+
+`node test_collapse.mjs` covers all of it — country clones, cross-source conflict,
+the eligibility tie-break, lone postings, and two different titles at one employer
+staying separate. No network required.
+
+### Mark only what you send
+
+Worth knowing if you write your own dedup: it is tempting to mark every posting
+you examine and then slice to the cap. That records the overflow as "sent", so
+anything past the cap is **never announced at all** — the opposite of "it waits
+for the next run". Gate on the threshold *before* dedup, and mark only the batch
+that actually goes out.
+
 ## Editing
 
 ```bash
@@ -203,6 +255,7 @@ cd ~/Desktop/cv/n8n
 # edit build_workflow.py (source list, weights, threshold live there)
 python3 build_workflow.py
 node test_pipeline.mjs              # dry run: counts + top 15, sends nothing
+node test_collapse.mjs              # unit-tests the clone collapsing, no network
 node test_pipeline.mjs --notify 3   # also pushes top 3 to Telegram
 
 docker cp jobs-radar.workflow.json n8n-local:/tmp/jobs-radar.json

@@ -39,17 +39,29 @@ const normalized = run(code('Normalize Jobs'), {
 });
 const scored = run(code('Score vs Profile'), { $input: { all: () => normalized } });
 
+// DONE_COMPANIES tags rather than drops: a company-level filter cannot tell that a
+// NEW posting at a company you already applied to is a level up, and dropping it
+// makes that role invisible to triage. The judgement belongs to the read.
+const seenRole = new Set();
 const shortlist = scored
   .map((s) => s.json)
   .filter((j) => !j.reasons.includes('-US-only'))
   .filter((j) => !j.reasons.includes('-likely US-only'))
   .filter((j) => !ALREADY.some((re) => re.test(j.title)))
-  .filter((j) => !DONE_COMPANIES.test(j.company || ''))
-  .filter(EU_OK);
+  .filter(EU_OK)
+  // Collapse per-country clones of one role, same as the pipeline does.
+  .sort((a, b) => b.score - a.score)
+  .filter((j) => {
+    const k = `${(j.company || '').toLowerCase()}|${j.title.toLowerCase()}`;
+    if (seenRole.has(k)) return false;
+    seenRole.add(k);
+    return true;
+  })
+  .map((j) => ({ ...j, applied: DONE_COMPANIES.test(j.company || '') }));
 
-console.log(`\n${normalized.length} postings -> ${scored.length} PM-titled -> ${shortlist.length} EU-eligible, new companies\n`);
+console.log(`\n${normalized.length} postings -> ${scored.length} PM-titled -> ${shortlist.length} EU-eligible roles (country clones collapsed; [APPLIED BEFORE] = already in DONE_COMPANIES)\n`);
 for (const j of shortlist.slice(0, 30)) {
-  console.log(`${String(j.score).padStart(3)} | ${j.company} | ${j.title}`);
+  console.log(`${String(j.score).padStart(3)} | ${j.company}${j.applied ? ' [APPLIED BEFORE]' : ''} | ${j.title}`);
   console.log(`      ${j.location}  ·  ${j.reasons.join(' · ')}`);
   console.log(`      ${j.url}`);
 }

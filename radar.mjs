@@ -112,8 +112,14 @@ for (const k of Object.keys(store.seen)) {
   if (now - store.seen[k] > TTL) delete store.seen[k];
 }
 
+// Collapse per-country clones of one role before the cap, or a single
+// multi-country employer can spend the whole run. The kept variant is the one the
+// configured profile can actually take; the others are named in the message.
+const collapsed = run(code('Collapse Role Clones'), { $input: { all: () => scored } });
+console.log(`PM-titled: ${scored.length} -> ${collapsed.length} distinct roles after collapsing clones`);
+
 const fresh = [];
-for (const s of scored) {
+for (const s of collapsed) {
   const j = s.json;
   if (j.score < THRESHOLD) continue;
   if (!j.url || store.seen[j.url]) continue;
@@ -131,6 +137,11 @@ for (const j of batch) {
     `${j.score}/100  ${j.title}`,
     `${j.company}  ·  ${j.location}`,
     j.reasons.join(' · '),
+    // Naming the sibling locations is the point of collapsing: the reachable
+    // clone is the one linked, and the fallbacks stay visible.
+    ...(j.alsoOpenIn && j.alsoOpenIn.length
+      ? [`also open in: ${j.alsoOpenIn.join(', ')}`]
+      : []),
     j.url,
   ].join('\n');
 
@@ -149,6 +160,9 @@ for (const j of batch) {
     await new Promise((res) => setTimeout(res, 1200));
   }
   store.seen[j.url] = now;
+  // Retire the sibling clones with it, so the other locations of the same role do
+  // not arrive next run looking new.
+  for (const u of j.cloneUrls || []) store.seen[u] = now;
 }
 
 // ---- 6. persist ------------------------------------------------------------
