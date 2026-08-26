@@ -30,7 +30,7 @@ check('other locations kept for the message', (out[0]?.json.alsoOpenIn||[]).leng
 check('reasons announce the collapse',
   out[0]?.json.reasons.some(r=>/\+9 other locations/.test(r)), out[0]?.json.reasons.join(' · '));
 check('no false source-conflict flag on a single-source group',
-  !out[0]?.json.reasons.some(r=>/sources disagree/.test(r)));
+  !out[0]?.json.reasons.some(r=>/aggregators disagree/.test(r)));
 
 // --- 2. Two aggregators, one role, contradicting locations -------------------
 const conflicting = [
@@ -47,7 +47,7 @@ check('took the strict read, not the higher-scoring phantom',
   out[0]?.json.location==='Singapore' && out[0]?.json.score===55,
   `${out[0]?.json.location} @ ${out[0]?.json.score}`);
 check('the disagreement is stated in the message',
-  out[0]?.json.reasons.some(r=>/sources disagree/.test(r)), out[0]?.json.reasons.join(' · '));
+  out[0]?.json.reasons.some(r=>/aggregators disagree/.test(r)), out[0]?.json.reasons.join(' · '));
 
 // --- 3. Equal scores: eligibility must break the tie ------------------------
 out = collapse([
@@ -119,6 +119,43 @@ out = collapse([
      location:'Utrecht', url:'g/4', score:40, reasons:['PM title','EU location']}),
 ]);
 check('meaningful trailing dash segment survives -> stays 2 roles', out.length===2, `got ${out.length}`);
+
+// An aggregator mirroring ONE clone of a first-party multi-country req must not
+// trigger the strict read. Before this was fixed, the mirror pushed the source
+// count to two, the pessimistic branch picked the employer's own home-country-only
+// clone, and the reachable high scorer disappeared from the run.
+out = collapse([
+  j({source:'greenhouse', company:'example-observability', title:'Staff Product Manager, Telemetry | Spain | Remote',
+     location:'Spain (Remote)', url:'gh/spain', score:76, reasons:['lead/staff title','remote EU/EMEA','Spain-eligible']}),
+  j({source:'greenhouse', company:'example-observability', title:'Staff Product Manager, Telemetry | UK | Remote',
+     location:'United Kingdom (Remote)', url:'gh/uk', score:69, reasons:['lead/staff title','remote EU/EMEA']}),
+  j({source:'greenhouse', company:'example-observability', title:'Staff Product Manager, Telemetry | US | Remote',
+     location:'United States (Remote)', url:'gh/us', score:21, reasons:['lead/staff title','-US-only']}),
+  j({source:'arbeitnow', company:'example-observability', title:'Staff Product Manager, Telemetry | UK | Remote',
+     location:'United Kingdom', url:'an/uk', score:53, reasons:['lead/staff title','remote EU/EMEA']}),
+]);
+check('employer board outranks an aggregator mirror -> 1 notification', out.length===1, `got ${out.length}`);
+check('kept the reachable clone, not the home-country-only one',
+  out[0]?.json.score===76 && out[0]?.json.url==='gh/spain', `got ${out[0]?.json.score} ${out[0]?.json.url}`);
+check('no false aggregator-conflict flag on a first-party group',
+  !out[0]?.json.reasons.some(r=>/aggregators disagree/.test(r)), out[0]?.json.reasons.join(' \u00b7 '));
+check('the aggregator mirror is retired with the group',
+  (out[0]?.json.cloneUrls||[]).includes('an/uk'), (out[0]?.json.cloneUrls||[]).join(', '));
+check('all 3 sibling URLs carried for dedup',
+  (out[0]?.json.cloneUrls||[]).length===3, String((out[0]?.json.cloneUrls||[]).length));
+check('"also open in" names employer-board locations only',
+  !(out[0]?.json.alsoOpenIn||[]).includes('United Kingdom'), (out[0]?.json.alsoOpenIn||[]).join(', '));
+
+// A group that is ONLY aggregators, with two of them disagreeing, is still a
+// phantom and must still get the strictest read.
+out = collapse([
+  j({source:'arbeitnow', company:'example-ai', title:'Senior Product Manager',
+     location:'London, United Kingdom', url:'an/1', score:72, reasons:['senior title','EU location']}),
+  j({source:'himalayas', company:'example-ai', title:'Senior Product Manager',
+     location:'Singapore', url:'hi/1', score:55, reasons:['senior title','worldwide (unverified)']}),
+]);
+check('aggregator-only disagreement still takes the strict read',
+  out.length===1 && out[0]?.json.score===55, `got ${out[0]?.json.score}`);
 
 console.log(fail? `\n${fail} FAILURE(S)` : '\nall checks passed');
 process.exit(fail?1:0);

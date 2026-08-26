@@ -733,30 +733,58 @@ const out = [];
 for (const variants of groups.values()) {
   if (variants.length === 1) { out.push({ json: variants[0] }); continue; }
 
-  const sources = [...new Set(variants.map((v) => v.source).filter(Boolean))];
+  // Third-party aggregators re-list other people's postings and mislabel where the
+  // job is. A company's own ATS is the employer describing its own vacancy.
+  const AGGREGATORS = new Set([
+    'remoteok', 'himalayas', 'wwr', 'remotive', 'jobicy', 'workingnomads',
+    'arbeitnow', 'themuse',
+  ]);
+  const firstParty = variants.filter((v) => !AGGREGATORS.has(v.source));
+  const aggSources = [...new Set(
+    variants.filter((v) => AGGREGATORS.has(v.source)).map((v) => v.source),
+  )];
 
-  // When the SAME role arrives from DIFFERENT sources with different locations,
-  // one source is lying -- and it is reliably the optimistic one. A role that one
+  // When the SAME role arrives from DIFFERENT aggregators with different locations,
+  // one of them is lying -- and it is reliably the optimistic one. A role that one
   // aggregator listed as "United Kingdom" and another as "Singapore" was
   // Singapore-only in the employer's own posting, and the inflated copy scored 17
   // points higher, which is enough to top a batch. Same failure as the
   // WeWorkRemotely "Anywhere in the World" mislabels documented in the README.
   // So on conflict, take the LEAST eligible read and say so, rather than letting a
   // phantom lead the run.
-  const conflict = sources.length > 1
+  //
+  // The trap: that rule must NOT fire on an employer legitimately posting one role
+  // in several countries on its own board. A req cloned across seven countries --
+  // one of them home-country-only -- picks up an aggregator mirror of a single
+  // clone, the source count goes to two, the pessimistic branch selects the
+  // least-eligible clone, and a perfectly reachable high scorer drops below the
+  // threshold and disappears from the run. So:
+  //   - if the employer's own ATS is in the group, that IS the truth: rank among
+  //     first-party variants and let the aggregator mirrors ride along as clones;
+  //   - only an aggregator-only group, with two aggregators actually disagreeing,
+  //     is a phantom and gets the strictest read.
+  const trusted = firstParty.length ? firstParty : variants;
+  const conflict = !firstParty.length
+    && aggSources.length > 1
     && new Set(variants.map(eligibility)).size > 1;
 
-  const ranked = [...variants].sort((a, b) => (conflict
+  const ranked = [...trusted].sort((a, b) => (conflict
     ? eligibility(a) - eligibility(b) || a.score - b.score
     : eligibility(b) - eligibility(a) || b.score - a.score));
 
   const pick = ranked[0];
-  const others = ranked.slice(1);
-  const alts = [...new Set(others.map((v) => v.location).filter(Boolean))];
+  // Everything not picked still has to be retired -- including the aggregator
+  // mirrors held out of the ranking above, or they arrive next run looking new.
+  const others = variants.filter((v) => v !== pick);
+  // "also open in" should name real sibling locations, not an aggregator's
+  // rendering of one already listed, so it is built from the trusted set only.
+  const alts = [...new Set(
+    ranked.slice(1).map((v) => v.location).filter(Boolean),
+  )];
 
   const reasons = [...(pick.reasons || [])];
   if (conflict) {
-    reasons.push(`-sources disagree (${sources.join(' vs ')}) - took the strictest`);
+    reasons.push(`-aggregators disagree (${aggSources.join(' vs ')}) - took the strictest`);
   }
   if (alts.length) reasons.push(`+${alts.length} other location${alts.length > 1 ? 's' : ''}`);
 
