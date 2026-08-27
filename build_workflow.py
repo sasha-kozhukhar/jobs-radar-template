@@ -13,10 +13,14 @@ import os
 #   export TELEGRAM_TOKEN=...   export TELEGRAM_CHAT_ID=...
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "TELEGRAM_TOKEN_PLACEHOLDER")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_PLACEHOLDER")
-# 48 required AI/domain keyword hits on top of a senior title; that filtered out
-# plain "Senior Product Manager" roles entirely. 30 = senior title (24) + any
-# positive geo signal (>=7), while a non-senior "Product Manager" (12) still
-# cannot pass on title + geo alone.
+# This was briefly lowered to 30, on the diagnosis that 48 "required AI/domain
+# keyword hits on top of a senior title" and so filtered out plain "Senior Product
+# Manager" roles. That diagnosis was a symptom: Greenhouse -- 34 boards, ~47% of the
+# corpus -- was being fetched without `?content=true`, so those postings had NO
+# description and literally could not score keyword hits. The threshold had been
+# lowered to accommodate a bug. With descriptions present the distribution shifts up
+# by roughly 20 points (on one 4,600-posting sample, >=50 went from 3 postings to 55),
+# so 48 is restored to its original meaning.
 SCORE_THRESHOLD = 48
 
 # ---------------------------------------------------------------- source list
@@ -58,7 +62,7 @@ const teamtailor = [
   'tacton', 'doconomy',
 ];
 // Personio XML boards — the DACH startup ATS, the segment the big-brand boards
-// miss entirely (alago, the 08-20 Munich match, sits in exactly this bracket).
+// miss entirely — an 11-person Munich ConTech firm sat in exactly this bracket.
 // Caveat: <jobDescriptions> is often empty, so scoring falls back to title +
 // office. Personio rate-limits hard: 429s appear when requests are not spaced.
 const personio = [
@@ -74,9 +78,35 @@ const workable = ['huggingface'];
 // SmartRecruiters public postings API. Full-text q filter with an exact phrase
 // keeps Delivery Hero's 1000+ postings down to a fetchable page; the score
 // node's title gate drops the non-PM remainder.
+// Pinpoint careers boards. `https://<tenant>.pinpointhq.com/postings.json` returns
+// every open posting with the FULL job description, plus separate
+// `key_responsibilities` and `skills_knowledge_expertise` blocks — the requirements
+// section that the 12000-char cap exists to reach. Richer than most sources here.
+// A company's own careers domain serves the identical payload, so the subdomain form
+// is used and the tenant is the only thing to know.
+//
+// Worth adding a platform like this even for a handful of tenants: the posting that
+// prompted it arrived by hand from a job link and was invisible to every one of the
+// 119 endpoints already in this list, with no aggregator re-listing it either.
+const pinpoint = ['improbable', 'unmind', 'quantexa', 'marshmallow'];
+// BambooHR careers boards. Two public JSON endpoints, no auth, no bot protection:
+// `/careers/list` (all open postings) and `/careers/{id}/detail` (full JD +
+// datePosted + compensation). Only the list is fetched — one request per source is
+// what Fetch Board can do — so like `workable` and `smartrecruiters` these postings
+// arrive with no description and no date. Their title, department and country are
+// real, which is enough for a title-and-geography gate to work on.
+//
+// Listed as [subdomain, display name]: the subdomain is rarely a readable company
+// name, and it is the company name that goes into the notification.
+// Adding a tenant is just the subdomain from any careers URL. A subdomain that is
+// not a BambooHR customer answers 302 text/html, so a typo shows up as a dead board
+// in STATUS.md rather than as silence.
+const bamboohr = [
+  ['finbourne', 'FINBOURNE'],
+];
 const smartrecruiters = ['DeliveryHero'];
 // Getro powers the talent boards of most European VCs: one endpoint per fund
-// covers its whole portfolio, which is the alago-sized bracket that guessing
+// covers its whole portfolio, which is the small-company bracket that guessing
 // individual ATS tenants keeps missing. Ids come from the board's own
 // __NEXT_DATA__ (props.pageProps.network.id) — see README for how to add a fund.
 // This is the only POST source: the API is POST-only (GET 404s) and it insists
@@ -133,6 +163,25 @@ for (const [fund, id] of getro) {
     delayMs: 4000,
   } });
 }
+for (const org of pinpoint) {
+  out.push({ json: { kind: 'pinpoint', company: org,
+    url: `https://${org}.pinpointhq.com/postings.json` } });
+  // Second request per tenant, purely for dates. Neither Pinpoint feed is complete:
+  // postings.json has structured locations but no date, /en/jobs.rss has pubDate but
+  // NO location at all (and only the English postings: on one board, 49 items vs 84).
+  // So the JSON supplies the postings and the RSS supplies `postedAt`, joined on the
+  // job id -- the RSS <link> is `/jobs/308423` and that number is `job.id` in the
+  // JSON. Measured on that board: 49 of 50 distinct job ids covered.
+  //
+  // This does NOT disturb Normalize's response<->source pairing, which is by array
+  // index: two source entries simply get two responses, and the index map stays 1:1.
+  out.push({ json: { kind: 'pinpoint-rss', company: org,
+    url: `https://${org}.pinpointhq.com/en/jobs.rss` } });
+}
+for (const [org, label] of bamboohr) {
+  out.push({ json: { kind: 'bamboohr', company: label, tenant: org,
+    url: `https://${org}.bamboohr.com/careers/list` } });
+}
 for (const org of smartrecruiters) {
   out.push({ json: { kind: 'smartrecruiters', company: org,
     url: `https://api.smartrecruiters.com/v1/companies/${org}/postings?q=%22product%20manager%22&limit=100` } });
@@ -177,13 +226,30 @@ const strip = (s) => String(s || '')
 
 const jobs = [];
 
+// Pre-pass: Pinpoint dates, keyed `tenant|jobId`. Must run before the main loop
+// because the RSS source sits after the JSON source for the same tenant.
+const pinpointDates = {};
+responses.forEach((resp, i) => {
+  const src = (sources[i] && sources[i].json) || {};
+  if (src.kind !== 'pinpoint-rss') return;
+  const raw = resp.json.data !== undefined ? resp.json.data : resp.json;
+  const xml = String(typeof raw === 'string' ? raw : '');
+  (xml.match(/<item>[\s\S]*?<\/item>/g) || []).forEach((item) => {
+    const link = (item.match(/<link>([\s\S]*?)<\/link>/) || [])[1] || '';
+    const date = (item.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1] || '';
+    const id = (link.match(/\/jobs\/(\d+)/) || [])[1];
+    if (id && date) pinpointDates[`${src.company}|${id}`] = date.trim();
+  });
+});
+
 responses.forEach((resp, i) => {
   const src = (sources[i] && sources[i].json) || {};
   const kind = src.kind;
   const raw = resp.json.data !== undefined ? resp.json.data : resp.json;
 
   let parsed = raw;
-  if (typeof raw === 'string' && kind !== 'wwr' && kind !== 'personio') {
+  if (typeof raw === 'string' && kind !== 'wwr' && kind !== 'personio'
+      && kind !== 'pinpoint-rss') {
     try { parsed = JSON.parse(raw); } catch (e) { return; }
   }
 
@@ -302,6 +368,64 @@ responses.forEach((resp, i) => {
         description: '',
         postedAt: j.created_at ? new Date(j.created_at * 1000).toISOString() : null,
       }));
+    } else if (kind === 'pinpoint') {
+      // Pinpoint wraps its postings in `{ data: [...] }` — the same key the unwrap
+      // above uses for n8n's HTTP-response envelope, so `parsed` arrives as the bare
+      // array here and `parsed.data` is `undefined`. Written first without this and it
+      // silently yielded zero postings. Both shapes are accepted.
+      const rows = Array.isArray(parsed) ? parsed : (parsed.data || []);
+      rows.forEach((j) => {
+        const l = j.location || {};
+        // No country field anywhere in the payload — city + province is all there is,
+        // and `province` is inconsistent (the country for Paris, a region for a German
+        // city, a US state name for New York). Cost: cities outside the score node's
+        // EU_WORD list lose the "EU location" bonus, 9 points each.
+        //
+        // Only "Fully remote" is appended, never Hybrid/Onsite — same rule as `lever`
+        // and `workable`, which add 'Remote' and nothing else. Appending the work model
+        // unconditionally was tried first and it made Pinpoint the only source able to
+        // trigger the hybrid penalty, docking these postings another 10 points for a
+        // fact its peers simply never report.
+        const remote = j.workplace_type === 'remote'
+          || /fully remote/i.test(j.workplace_type_text || '') ? 'Remote' : '';
+        const parts = [...new Set([l.city, l.province, remote]
+          .filter(Boolean).map(String))];
+        push({
+          title: j.title,
+          url: j.url,
+          location: parts.join(', '),
+          // The three blocks are one JD split across three fields. Concatenated
+          // because the requirements — language demands, knockout conditions —
+          // live in the latter two, not in `description`.
+          description: [j.description, j.key_responsibilities,
+            j.skills_knowledge_expertise].filter(Boolean).join(' '),
+          // Localized duplicates share one `job.id` with their English sibling, so
+          // the join lands on the underlying job, which is what the posting age is a
+          // property of. Postings with no English sibling stay undated and simply
+          // escape the age penalty.
+          postedAt: pinpointDates[`${src.company}|${j.job && j.job.id}`] || null,
+        });
+      });
+    } else if (kind === 'pinpoint-rss') {
+      // Date source only — consumed by the pre-pass above, pushes nothing.
+      return;
+    } else if (kind === 'bamboohr') {
+      // The list response carries no description and no date; `atsLocation` is the
+      // hiring country (BambooHR's own `location` object is empty on these boards).
+      (parsed.result || []).forEach((j) => {
+        // `province` is often just the country repeated (one board rendered Belgrade
+        // as "Belgrade, Serbia, Serbia"), so the parts are deduped, not concatenated.
+        const a = j.atsLocation || {};
+        const parts = [...new Set([a.city, a.state || a.province, a.country]
+          .filter(Boolean).map(String))];
+        push({
+          title: j.jobOpeningName,
+          url: `https://${src.tenant}.bamboohr.com/careers/${j.id}`,
+          location: parts.join(', '),
+          description: '',
+          postedAt: null,
+        });
+      });
     } else if (kind === 'smartrecruiters') {
       (parsed.content || []).forEach((j) => push({
         title: j.name,
@@ -514,10 +638,54 @@ const TITLE_BLOCK = [
   [/\bintern\b|contract recruiter|localization/i, 'other'],
 ];
 
+// Location vocabulary. Both lists used to be country-level while most boards write a
+// bare city, and the cost is easy to under-estimate: on one 9,720-posting corpus,
+// **4,197 (43%) had a location matching NEITHER pattern**. The damage was one-sided.
+// ~1,700 of those were US offices escaping the -32 US-only penalty completely --
+// "San Francisco" alone appeared 1,082 times, "New York"/"New York City" 380 more --
+// because the state-code pattern needs ", CA" and these postings just say the city.
+// Meanwhile Munich (93 incl. "München"), Stockholm (146), Milan (19), Frankfurt and
+// Belgrade roles silently lost the +9 EU bonus even though EU_WORD listed their
+// countries. If you re-target this radar, re-run that census on YOUR corpus.
+//
+// The city list is the same one COLLAPSE's LOC_TAG carries, which is where it was
+// already written down once; duplicated rather than shared because these are two
+// separate n8n Code nodes.
 const US_STATE = /,\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/;
 const US_WORD = /\b(u\.?s\.?a?\.?|united states)\b/i;
-const EU_WORD = /\b(emea|europe|european|spain|madrid|barcelona|germany|berlin|netherlands|amsterdam|portugal|lisbon|ireland|dublin|uk|united kingdom|london|poland|france|paris|italy|sweden|denmark|austria|belgium|czech|romania|bulgaria|greece|hungary|estonia|latvia|lithuania|croatia|serbia|slovakia|slovenia|finland|norway)\b/i;
+// Bare US city names. Checked against the corpus for collisions with the EU list
+// before adding: on that corpus, none of the 119 distinct US_STATE-matching
+// locations was European,
+// and usOnly requires !EU_WORD anyway, so an EU city that shares a US name (Berlin
+// CT, Paris TX) is still protected by EU_WORD winning first.
+const US_CITY = /\b(san francisco|new york|nyc\b|palo alto|mountain view|san jose|san mateo|sunnyvale|santa clara|seattle|bellevue|austin|chicago|boston|cambridge, ma|denver|boulder|atlanta|dallas|houston|miami|philadelphia|phoenix|portland, or|san diego|los angeles|\bla\b(?! ?paz)|minneapolis|detroit|pittsburgh|nashville|charlotte|raleigh|durham|salt lake city|las vegas|kansas city|st\.? louis|columbus, oh|arlington|bethesda|reston|mclean|redmond|sacramento)\b/i;
+const EU_WORD = /\b(emea|europe|european|spain|madrid|barcelona|valencia|m[aá]laga|granada|sevilla|bilbao|germany|berlin|munich|m[uü]nchen|hamburg|cologne|k[oö]ln|frankfurt|stuttgart|d[uü]sseldorf|mannheim|karlsruhe|leipzig|dresden|g[oö]ttingen|heidelberg|netherlands|amsterdam|utrecht|rotterdam|eindhoven|the hague|den haag|portugal|lisbon|lisboa|porto|ireland|dublin|cork|uk|united kingdom|england|scotland|wales|london|manchester|edinburgh|glasgow|bristol|cambridge, uk|oxford|leeds|birmingham|poland|warsaw|warszawa|krak[oó]w|krakow|wroc[lł]aw|gda[nń]sk|pozna[nń]|france|paris|lyon|marseille|toulouse|bordeaux|nantes|lille|italy|italia|milan|milano|rome|roma|turin|torino|bologna|naples|napoli|sweden|stockholm|gothenburg|g[oö]teborg|malm[oö]|denmark|copenhagen|k[oø]benhavn|aarhus|austria|vienna|wien|graz|switzerland|zurich|z[uü]rich|geneva|gen[eè]ve|basel|lausanne|belgium|brussels|bruxelles|antwerp|ghent|gent|leuven|czech|czechia|prague|praha|brno|romania|bucharest|bucure[sș]ti|cluj|timi[sș]oara|bulgaria|sofia|plovdiv|greece|athens|thessaloniki|hungary|budapest|estonia|tallinn|tartu|latvia|riga|lithuania|vilnius|kaunas|croatia|zagreb|split|slovakia|bratislava|slovenia|ljubljana|finland|helsinki|espoo|tampere|norway|oslo|bergen|trondheim|luxembourg|malta|cyprus|nicosia|iceland|reykjav[ií]k|serbia|belgrade|beograd|novi sad)\b/i;
+// Only the location field may claim worldwide eligibility. Tested against
+// location+description at first, which meant a company blurb was enough: one
+// company's "enabling sustainable growth for businesses worldwide" handed its
+// office-bound roles the full +16, and a Prague office role the same. On a
+// 33-posting sample, 2 of the 4 "worldwide" bonuses awarded were this -- one of
+// them above the threshold. "worldwide" and "global" are marketing words in a description; they are
+// eligibility statements only in a location field.
 const ANY_WORD = /\b(worldwide|anywhere|global|any location)\b/i;
+// The narrow exception: phrases that state location-free hiring outright, which a
+// marketing blurb does not produce. These may be read from the description.
+const ANY_DESC = /anywhere in the world|work from anywhere|from anywhere in|fully distributed|location.independent|no location requirement/i;
+// Same principle for the EU-remote bonus, and it needed two attempts. The first
+// version accepted `based in Europe` anywhere in the description, which promoted an
+// India-based role to 54 with a "remote EU/EMEA" bonus off the sentence
+// "...teams based in Europe...". A description mentions Europe descriptively
+// far more often than it grants eligibility, so only phrasings that are *about this
+// role's eligibility* count. Everything softer than these falls through to the plain
+// `remote` +7, which is the honest read of "we could not tell from the text".
+const EU_DESC = new RegExp([
+  'remote\\s*(-|,)?\\s*(with)?in\\s+(europe|the eu\\b|emea)',
+  'remote\\s+from\\s+(europe|the eu\\b|anywhere in europe)',
+  'anywhere in europe',
+  '(candidates?|applicants?|you)\\s+(must|need to|should)\\s+be\\s+(based|located|resident)\\s+in\\s+(europe|the eu\\b)',
+  'eligible to work in the eu\\b',
+  'work(ing)? authoriz(ation|ed) in the eu\\b',
+].join('|'), 'i');
 
 const out = [];
 
@@ -586,16 +754,24 @@ for (const item of $input.all()) {
   // and any US signal anywhere in the posting is treated as a likely restriction.
   const AGGREGATOR = ['wwr','remoteok','himalayas','remotive','jobicy','workingnomads','arbeitnow','themuse'].includes(j.source);
 
-  const geo = `${loc} ${desc.slice(0, 400)}`;
+  const head = desc.slice(0, 400);
+  const geo = `${loc} ${head}`;
   const isRemote = /\bremote\b|\bdistributed\b/i.test(geo);
-  const usOnly = (US_STATE.test(loc) || US_WORD.test(loc)) && !EU_WORD.test(loc) && !ANY_WORD.test(loc);
+  // The location field is the only place a *place* is asserted; the description may
+  // only contribute an explicit eligibility phrase (ANY_DESC / EU_DESC). Reading
+  // bare place words out of the description is what handed office-bound roles a
+  // worldwide bonus -- see the ANY_WORD comment above.
+  const anyWhere = ANY_WORD.test(loc) || ANY_DESC.test(head);
+  const euRemote = (EU_WORD.test(loc) && isRemote) || EU_DESC.test(head);
+  const usOnly = (US_STATE.test(loc) || US_WORD.test(loc) || US_CITY.test(loc))
+    && !EU_WORD.test(loc) && !ANY_WORD.test(loc);
   const usHint = AGGREGATOR && /remote\s*[-–,]?\s*(usa|us\b)|united states|\bus only\b|us.based/i.test(desc);
 
-  if (ANY_WORD.test(geo)) {
+  if (anyWhere) {
     const pts = AGGREGATOR ? 6 : 16;
     score += pts;
     reasons.push(AGGREGATOR ? 'worldwide (unverified)' : 'worldwide');
-  } else if (EU_WORD.test(geo) && isRemote) { score += 16; reasons.push('remote EU/EMEA'); }
+  } else if (euRemote) { score += 16; reasons.push('remote EU/EMEA'); }
   else if (EU_WORD.test(loc)) { score += 9; reasons.push('EU location'); }
   else if (isRemote && !usOnly) { score += 7; reasons.push('remote'); }
 
