@@ -15,7 +15,7 @@ on:
         default: false
       threshold:
         description: 'Score cut-off'
-        default: '48'
+        default: '40'
       max_per_run:
         description: 'Cap on notifications (raise it on a dry run to see the whole queue)'
         default: '12'

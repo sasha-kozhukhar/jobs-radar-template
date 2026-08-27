@@ -9,7 +9,9 @@ const run = (src, ctx) => new Function('$input', '$', '$getWorkflowStaticData', 
 const ALREADY = [/* /some role title/i — titles to exclude */];
 // Companies you have already applied to, been rejected by, or ruled out.
 // Keep this in sync with wherever you track applications.
-const DONE_COMPANIES = /^(example-company|another-company)$/i;
+// The applied/closed lists now live in build_workflow.py and reach every posting as
+// `history` from the Score node -- one source of truth, so this script cannot drift
+// from your application log the way its own copy of the list did.
 // Only show roles reachable without a work-authorisation fight.
 const EU_OK = (j) => j.reasons.some((r) => /Spain-eligible|remote EU\/EMEA|EU location|worldwide$/.test(r));
 
@@ -57,9 +59,9 @@ const shortlist = scored
     seenRole.add(k);
     return true;
   })
-  .map((j) => ({ ...j, applied: DONE_COMPANIES.test(j.company || '') }));
+  .map((j) => ({ ...j, applied: j.history === 'applied' || j.history === 'closed' }));
 
-console.log(`\n${normalized.length} postings -> ${scored.length} PM-titled -> ${shortlist.length} EU-eligible roles (country clones collapsed; [APPLIED BEFORE] = already in DONE_COMPANIES)\n`);
+console.log(`\n${normalized.length} postings -> ${scored.length} PM-titled -> ${shortlist.length} EU-eligible roles (country clones collapsed; [APPLIED BEFORE] = already in your applied/closed lists)\n`);
 for (const j of shortlist.slice(0, 30)) {
   console.log(`${String(j.score).padStart(3)} | ${j.company}${j.applied ? ' [APPLIED BEFORE]' : ''} | ${j.title}`);
   console.log(`      ${j.location}  ·  ${j.reasons.join(' · ')}`);

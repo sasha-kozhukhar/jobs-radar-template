@@ -8,7 +8,7 @@
 //   TELEGRAM_TOKEN    required
 //   TELEGRAM_CHAT_ID  required
 //   DRY_RUN=1         score and print, send nothing
-//   THRESHOLD=48      override the score cut-off
+//   THRESHOLD=40      override the score cut-off
 //   MAX_PER_RUN=12    cap notifications per run
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,7 +22,7 @@ const STATUS_MD = path.join(HERE, 'STATUS.md');
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT = process.env.TELEGRAM_CHAT_ID;
 const DRY = process.env.DRY_RUN === '1';
-const THRESHOLD = Number(process.env.THRESHOLD || 48);
+const THRESHOLD = Number(process.env.THRESHOLD || 40);
 const MAX_PER_RUN = Number(process.env.MAX_PER_RUN || 12);
 
 if (!DRY && (!TOKEN || !CHAT)) {
@@ -119,12 +119,20 @@ const collapsed = run(code('Collapse Role Clones'), { $input: { all: () => score
 console.log(`PM-titled: ${scored.length} -> ${collapsed.length} distinct roles after collapsing clones`);
 
 const fresh = [];
+let suppressed = 0;
 for (const s of collapsed) {
   const j = s.json;
   if (j.score < THRESHOLD) continue;
   if (!j.url || store.seen[j.url]) continue;
+  // Closed doors only. `applied` stays in and gets a warning line in the message --
+  // hard-dropping those once hid the best role of the week.
+  if (j.history === 'closed') { suppressed += 1; continue; }
+  // hunt.mjs always dropped these from its shortlist; the bot only got away with
+  // keeping them because a higher threshold excluded most US-only postings anyway.
+  if (j.reasons.some((r) => /^-US-only$|^-likely US-only$/.test(r))) { suppressed += 1; continue; }
   fresh.push(j);
 }
+if (suppressed) console.log(`suppressed ${suppressed} posting(s): closed-door companies or US-only`);
 const batch = fresh.slice(0, MAX_PER_RUN);
 console.log(`above threshold ${THRESHOLD}: ${fresh.length}, sending ${batch.length}`);
 if (fresh.length > batch.length) {
@@ -136,6 +144,9 @@ for (const j of batch) {
   const text = [
     `${j.score}/100  ${j.title}`,
     `${j.company}  ·  ${j.location}`,
+    ...(j.history === 'applied'
+      ? ['⚠ already applied to this company — check your log before spending another']
+      : []),
     j.reasons.join(' · '),
     // Naming the sibling locations is the point of collapsing: the reachable
     // clone is the one linked, and the fallbacks stay visible.

@@ -127,5 +127,55 @@ const munich = one({title:'Senior Product Manager', location:'Munich', descripti
 check('a Spain location still outranks a generic EU city',
   madrid.score > munich.score, `${madrid.score} vs ${munich.score}`);
 
+// ------------------------------------------------- working method + history
+
+// 17. The working-method block must score. On the corpus this was built against, the
+//     one posting that converted into an interview had every one of these signals and
+//     scored none of them.
+const plain = one({title:'Senior Product Manager', location:'Madrid',
+  description:'Own the roadmap for our B2B SaaS product.'});
+const method = one({title:'Senior Product Manager', location:'Madrid',
+  description:'Own the roadmap for our B2B SaaS product. We are an AI-native team: daily use of AI tools is expected, we work spec-driven, and you should have shipped something you can demo. Familiarity with Claude Code and Cursor.'});
+check('a working-method JD outranks an otherwise identical one',
+  method.score > plain.score + 15, `${method.score} vs ${plain.score}`);
+check('the working-method reasons are named',
+  method.reasons.some(r=>/AI tool she uses daily/.test(r)) && method.reasons.some(r=>/AI-native team/.test(r)),
+  method.reasons.join(' · '));
+
+// 18. It is capped, so five matches are not five times a match. Deliberately no
+//     agent/agentic wording in this string: that would also fire the `agents` keyword
+//     bucket and the delta would stop measuring the working-method cap alone (it read
+//     24 on the first attempt for exactly that reason).
+const everyMethod = one({title:'Senior Product Manager', location:'Madrid',
+  description:'Own the roadmap for our B2B SaaS product. AI-native, AI-first, daily use of AI tooling, spec-driven, OpenSpec, prototype it yourself, shipped something, show us not tell us. Claude Code, Cursor, Copilot, Windsurf, Replit.'});
+const wmRaw = 10 + 8 + 8 + 7 + 7;  // the five entries this string matches, uncapped
+check('the working-method bucket is capped at 22',
+  everyMethod.score - plain.score <= 22 && wmRaw > 22,
+  `delta ${everyMethod.score - plain.score}, uncapped would be ${wmRaw}`);
+
+// 19. And it must NEVER rescue a posting that failed the location gate. Ungated, this
+//     promoted an India-based role 38 -> 60 and a Remote-U.S. one 38 -> 48.
+const usMethod = one({title:'Senior Product Manager', location:'San Francisco',
+  description:'We are an AI-native team, daily use of AI tools, spec-driven, Claude Code and Cursor, shipped something you can demo.'});
+check('working-method does not fire on a US-only posting',
+  !usMethod.reasons.some(r=>/AI tool she uses daily/.test(r)), usMethod.reasons.join(' · '));
+const nonEuMethod = one({title:'Senior Product Manager', location:'Bengaluru',
+  description:'We are an AI-native team, daily use of AI tools, spec-driven, Claude Code and Cursor, shipped something you can demo.'});
+check('working-method does not fire where no positive geography reason exists',
+  !nonEuMethod.reasons.some(r=>/AI tool she uses daily/.test(r)), nonEuMethod.reasons.join(' · '));
+
+// 20. Application history is annotated, and it stays OUT of `reasons` so COLLAPSE's
+//     eligibility() cannot misread it as a geography signal.
+const known = one({company:'example-company', title:'Senior Product Manager', location:'Madrid', description:'Own the roadmap.'});
+const closed = one({company:'a-company-you-have-stopped-applying-to', title:'Senior Product Manager', location:'Madrid', description:'Own the roadmap.'});
+const unknown = one({company:'somebrandnewco', title:'Senior Product Manager', location:'Madrid', description:'Own the roadmap.'});
+check('a company already applied to is tagged applied', known.history === 'applied', String(known.history));
+check('a closed door is tagged closed', closed.history === 'closed', String(closed.history));
+check('an unknown company is not tagged', unknown.history === null, String(unknown.history));
+check('history never leaks into reasons',
+  !known.reasons.join(' ').match(/applied|closed/), known.reasons.join(' · '));
+check('history does not change the score',
+  known.score === unknown.score, `${known.score} vs ${unknown.score}`);
+
 console.log(fail? `\n${fail} FAILURE(S)` : '\nall checks passed');
 process.exit(fail?1:0);

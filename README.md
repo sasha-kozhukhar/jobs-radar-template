@@ -465,6 +465,67 @@ All of the above are covered by `node test_scoring.mjs` (checks 10–16), includ
 guard that an EU city is never read as a US state code: `"Mannheim, DE"` is Delaware
 to `US_STATE`, and only `EU_WORD` winning first prevents a −32.
 
+## Why the threshold is 40, and what had to change first
+
+The single most useful measurement made on this radar: **the one application that ever
+produced an interview scored 39 under the code of the day before, and exactly 48 after a
+geography fix.** A gate deciding your one success by a single point is measuring noise.
+Three things changed together — individually, any one of them makes the radar worse.
+
+**1. Application history reaches the scorer at all.** On the measured corpus, **65 of the
+83 postings above threshold (78%) were companies already applied to or doors already
+closed.** The list existed only in `hunt.mjs`, the manual triage script, and only as a
+display flag, so it drifted from the application log every time an application went out.
+
+It now lives in `build_workflow.py` (`DONE_COMPANIES` / `CLOSED_DOORS` — **replace both
+with your own**) and rides on every posting as `history`, which `hunt.mjs` consumes
+instead of its own copy. Deliberately an **annotation, not a filter**, and that
+distinction is the lesson: a hard drop once hid the best posting of the week, because a
+company-level filter cannot tell that a *new* role at a company you already applied to is
+a level up. `applied` gets a `⚠ already applied` line in the notification; only `closed`
+is suppressed.
+
+`history` is kept **out of `reasons`** on purpose: `COLLAPSE`'s `eligibility()` parses
+that array to choose which country clone is takeable, and a history tag in there is one
+more string for it to misread.
+
+**2. The working-method block scores.** A keyword scorer reads title and location well
+and reads *working-method* requirements barely at all — so a JD asking for precisely your
+rarest habit can score below a JD asking for nothing in particular. Here the signals were
+daily Claude/Cursor use, spec-driven delivery, AI-first teams and agentic products, and
+they had been contributing nothing beyond a generic `agents` tag. Adding `WORKING_METHOD`:
+that interview posting went **48 → 70**, corpus-wide `>=48` went **83 → 100**. Retune the
+list to whatever your own rare habit is.
+
+**Gated, and the gate is the point.** Measured ungated first, it did what a content bonus
+must never do — rescued postings that had already failed the location gate, promoting an
+**India-based role 38 → 60** and a **Remote-U.S. one 38 → 48** on working-method words
+alone. It now requires an *affirmative* eligibility reason, the same test `hunt.mjs`
+already used. That cut the newly-promoted set from 24 to 17, all actually eligible.
+Capped at 22 like the other buckets.
+
+**3. Only then, the threshold: 48 → 40.** `MAX_PER_RUN` already caps what goes out per
+run, so volume never needed a second guard; the threshold was deleting near-misses instead
+of ranking them last. At 40 they arrive at the bottom of the batch, where a human can
+still see them.
+
+Lowering it exposed one thing the higher number had been hiding: an explicitly
+**US-only** posting reached the batch (still 46 after its −32). `hunt.mjs` had always
+filtered `-US-only` out of its shortlist, so the notification step now does the same.
+That is the second and last suppression; everything else is annotated and ranked.
+
+**Result on a live dry run:** 9,895 postings → 427 PM-titled → 327 distinct roles after
+collapsing clones → **10 above 40**, i.e. one `MAX_PER_RUN` batch, topped by a company
+that had never appeared in any previous run.
+
+**Still open — the structural fix rather than a fifth regex.** Several of the worst bugs
+found in this scorer were the same family: keyword regexes reading a place, a date or a
+requirement out of free text. `WORKING_METHOD` is another regex of that family; it is
+measured and it works, but the underlying limit stands. The upgrade named in
+**Known limits** below — cheap scorer as a recall filter on title and geography, then an
+LLM reranking the survivors — solves the class instead of one instance. It needs an API
+key, which is why it is not done here.
+
 ## Known limits
 
 - **Only EU and US geography is modelled.** The location census turned up real volume

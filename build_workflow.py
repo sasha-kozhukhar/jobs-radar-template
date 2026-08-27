@@ -21,7 +21,17 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_PLACEHOL
 # lowered to accommodate a bug. With descriptions present the distribution shifts up
 # by roughly 20 points (on one 4,600-posting sample, >=50 went from 3 postings to 55),
 # so 48 is restored to its original meaning.
-SCORE_THRESHOLD = 48
+#
+# Then lowered to 40, and that was a change of *instrument* rather than of taste. The
+# one application that ever produced an interview scored 39 under the code of the day
+# before and exactly 48 after a geography fix -- a gate deciding your one success by a
+# single point is measuring noise. MAX_PER_RUN already caps what goes out per run, so
+# volume does not need a second guard; what the threshold was really doing was deleting
+# the near-misses instead of ranking them last. At 40 they arrive at the bottom of the
+# batch, where a human can still see them. Only survivable together with the
+# application-history annotation in the score node: on one corpus 78% of everything
+# above 48 was a company already applied to or a door already closed.
+SCORE_THRESHOLD = 40
 
 # ---------------------------------------------------------------- source list
 BUILD_SOURCES = r"""
@@ -532,6 +542,27 @@ return jobs.map((j) => ({ json: j }));
 
 # --------------------------------------------------------------------- score
 SCORE = r"""
+// ---------------------------------------------------------- application history
+// REPLACE THESE TWO LISTS WITH YOUR OWN, or leave them as-is and nothing is tagged.
+//
+// A radar that does not know what you have already spent will keep handing it back:
+// on one measured corpus, 65 of the 83 postings above threshold (78%) were companies
+// already applied to or doors already closed. Keeping the list only in the manual
+// triage script means it drifts from your application log every time you apply.
+//
+// This is deliberately an ANNOTATION, not a filter, and that distinction is the whole
+// lesson: a hard drop once hid the best posting of the week, because a company-level
+// filter cannot tell that a NEW role at a company you already applied to is a level up.
+// So `history` rides along on every posting and the *notification* step decides what to
+// do with it. A labelled role low in the list costs one glance; a wrong drop is
+// invisible, which is the worse failure.
+const DONE_COMPANIES = /^(example-company|another-company)$/i;
+// Closed doors: the narrow set where the evidence is in and another application buys no
+// information -- e.g. three applications to one company, three different domains, zero
+// visa friction, three byte-identical template rejections. These are the only ones the
+// notification step suppresses. Leave the placeholder if you have none yet.
+const CLOSED_DOORS = /^(a-company-you-have-stopped-applying-to)$/i;
+
 // EXAMPLE relevance profile — REPLACE THIS WITH YOUR OWN.
 // The keyword lists, seniority weights, geography bonuses and language gates below
 // encode one candidate's search (senior/lead PM, B2B SaaS + AI products, EU-based).
@@ -609,6 +640,27 @@ const SCARCE = [
 // JD should be able to clear the threshold on this signal alone, but not saturate.
 const SCARCE_CAP = 24;
 
+
+// How the team works, scored as a first-class signal -- and for this profile it was the
+// highest-value single addition to the scorer. The reasoning generalises: a keyword
+// scorer reads TITLE and LOCATION well and reads working-method requirements barely at
+// all, so a JD asking for precisely your rarest habit can score below a JD asking for
+// nothing in particular. On the corpus this was built against, the one posting that
+// converted into an interview had every one of these signals and scored none of them.
+//
+// Retune the list to whatever your own rare habit actually is. Measured effect here:
+// that posting went 48 -> 70, and corpus-wide >=48 went 83 -> 100.
+const WORKING_METHOD = [
+  [/\b(claude code|claude|cursor|copilot|windsurf|lovable|replit|bolt\.new|\bv0\b)\b/i, 10, 'names an AI tool she uses daily'],
+  [/\bai[\s-]native\b|\bai[\s-]first\b/i, 8, 'AI-native team'],
+  [/(use|using|used|usage of|adopt\w*|leverag\w*|habitual\w*|fluent\w*)[\s\w]{0,24}\bai (tool|tooling|assistant)/i, 8, 'requires hands-on AI tooling'],
+  [/spec[\s-]driven|openspec|prototype it yourself|build (a |your own )?prototype|vibe cod/i, 7, 'spec-driven / self-prototyping'],
+  [/shipped something|built something|show us,? not tell|something you can demo/i, 7, 'show-not-tell builder bar'],
+  [/agentic workflow|agentic product|agent pipeline/i, 6, 'agentic practice'],
+];
+// Capped like the other buckets: five of these firing is a strong signal, not five
+// times a strong signal.
+const WM_CAP = 22;
 
 // Title-level topic bonuses (these are real signal, not boilerplate).
 const TITLE_KW = [
@@ -820,8 +872,28 @@ for (const item of $input.all()) {
     }
   }
 
+  // Working-method bonus, gated on an AFFIRMATIVE eligibility reason rather than merely
+  // the absence of a US signal. Measured ungated first, and it did exactly what a
+  // content bonus must never do: rescued postings that had already failed the location
+  // gate, promoting an India-based role 38 -> 60 and a Remote-U.S. one 38 -> 48 on
+  // working-method words alone. Requiring a positive geography reason cut the
+  // newly-promoted set from 24 to 17, all of them actually eligible.
+  if (reasons.some((r) => /Spain-eligible|remote EU\/EMEA|EU location|worldwide/.test(r))) {
+    let wm = 0; const wmReasons = [];
+    for (const [re, pts, why] of WORKING_METHOD) {
+      if (re.test(desc) || re.test(title)) { wm += pts; wmReasons.push(why); }
+    }
+    if (wm > 0) { score += Math.min(wm, WM_CAP); reasons.push(...wmReasons); }
+  }
+
   score = Math.max(0, Math.min(100, Math.round(score)));
-  out.push({ json: { ...j, score, reasons: [...new Set(reasons)] } });
+  // Kept out of `reasons` on purpose: COLLAPSE's eligibility() parses that array to
+  // pick which country clone is actually takeable, and a history tag in there would be
+  // one more string for it to misread.
+  const co = (j.company || '').trim();
+  const history = CLOSED_DOORS.test(co) ? 'closed'
+    : DONE_COMPANIES.test(co) ? 'applied' : null;
+  out.push({ json: { ...j, score, reasons: [...new Set(reasons)], history } });
 }
 
 out.sort((a, b) => b.json.score - a.json.score);
@@ -996,6 +1068,16 @@ const fresh = [];
 for (const item of $input.all()) {
   const key = item.json.url;
   if (!key || store.seen[key]) continue;
+  // The two places application history and geography are allowed to REMOVE something.
+  // `closed` is the narrow set where another application buys no information.
+  // `applied` is NOT dropped -- it is annotated in the message instead, because a
+  // company you already applied to can still post the best role of the week.
+  if (item.json.history === 'closed') continue;
+  // A posting the scorer already identified as US-only is not takeable from the EU, and
+  // hunt.mjs always filtered these out of its shortlist. They only stayed visible here
+  // because a higher threshold happened to exclude most of them; at 40 an explicitly
+  // US-only posting reached the batch even after its -32.
+  if ((item.json.reasons || []).some((r) => /^-US-only$|^-likely US-only$/.test(r))) continue;
   fresh.push(item);
 }
 
@@ -1019,6 +1101,7 @@ return batch;
 TELEGRAM_TEXT = (
     "={{ '*' + $json.score + '/100* — ' + $json.title }}\n"
     "{{ $json.company }} · {{ $json.location }}\n"
+    "{{ $json.history === 'applied' ? '⚠ already applied to this company — check your log before spending another\\n' : '' }}"
     "{{ $json.reasons.join(' · ') }}\n\n"
     "{{ $json.url }}"
 )
