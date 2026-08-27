@@ -176,7 +176,12 @@ if (!DRY) {
 // without touching Telegram or seen.json.
 const stamp = new Date(now).toISOString();
 const down = health.filter((h) => !h.ok);
-const empty = health.filter((h) => h.ok && h.postings === 0);
+// `pinpoint-rss` is a date feed, not a board: it exists only so Normalize can join
+// pubDate onto the postings.json entries for the same tenant, and it is *supposed*
+// to contribute zero postings. Listing it under "live but returning nothing" made
+// every healthy Pinpoint tenant look like a broken one.
+const DATE_ONLY_KINDS = new Set(['pinpoint-rss']);
+const empty = health.filter((h) => h.ok && h.postings === 0 && !DATE_ONLY_KINDS.has(h.kind));
 const status = {
   generatedAt: stamp,
   dryRun: DRY,

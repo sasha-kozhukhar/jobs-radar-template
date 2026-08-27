@@ -99,10 +99,11 @@ Run manually  ─┴→ Build Source List → Fetch Board → Normalize Jobs
                 → Drop Already Sent → Send to Telegram
 ```
 
-- **Build Source List** — 119 endpoints: 34 Greenhouse boards,
-  42 Ashby, **10 Personio**, **8 Teamtailor**, 3 Recruitee, 3 Lever,
-  1 Workable (Hugging Face), 1 SmartRecruiters (Delivery Hero, pre-filtered with
-  `q="product manager"`), **8 Getro VC talent boards**, and 9 aggregator feeds
+- **Build Source List** — 128 endpoints: 34 Greenhouse boards,
+  42 Ashby, **10 Personio**, **8 Teamtailor**, **4 Pinpoint** (+4 Pinpoint RSS date
+  feeds, which contribute no postings of their own), 3 Recruitee, 3 Lever,
+  **1 BambooHR**, 1 Workable (Hugging Face), 1 SmartRecruiters (Delivery Hero,
+  pre-filtered with `q="product manager"`), **8 Getro VC talent boards**, and 9 aggregator feeds
   (RemoteOK, Himalayas, WWR RSS, Remotive, Jobicy, WorkingNomads, Arbeitnow,
   TheMuse ×2). All are official public JSON/RSS. No scraping, no auth, nothing
   that can get an account flagged.
@@ -125,8 +126,60 @@ Run manually  ─┴→ Build Source List → Fetch Board → Normalize Jobs
   simply work — `STATUS.md` after the next scheduled run is the answer. If all
   eight stay 403 there, drop the `getro` list; nothing else depends on it.
 
+  **Pinpoint** is the richest feed in this list: `postings.json` carries the full
+  description plus separate `key_responsibilities` and `skills_knowledge_expertise`
+  blocks — the requirements section that the 12000-char description cap exists to
+  reach. All three are concatenated. A company's own careers domain serves the
+  identical payload, so the `<tenant>.pinpointhq.com` form is used and the tenant is
+  the only unknown.
+
+  Four quirks, all of them the kind that fail silently:
+  1. **`{ data: [...] }` collides with the response unwrap** in Normalize, which
+     treats a `.data` key as n8n's HTTP-response envelope — so `parsed` arrives as
+     the bare array and `parsed.data` is `undefined`. Written without this, it yields
+     0 postings and no error.
+  2. **No country field exists anywhere in the payload** — city + `province` is all
+     there is, and `province` is inconsistent (the country for Paris, a region for a
+     German city, a US state *name*, not code, for New York). A city outside the
+     score node's `EU_WORD` list therefore loses the EU bonus, and `US_STATE` does
+     not fire on "New York City, New York".
+  3. **Only `Fully remote` is appended** to the location, never Hybrid/Onsite — the
+     same rule `lever` and `workable` follow. Appending the work model
+     unconditionally makes Pinpoint the only source able to trigger the hybrid
+     penalty, for a fact its peers never report at all.
+  4. **Neither Pinpoint feed is complete, so both are fetched.** `postings.json` has
+     structured locations but **no date**; `/en/jobs.rss` has `pubDate` and the full
+     `content:encoded` but **no location at all**, and only the English postings (on
+     one board, 49 items vs 84 including localized duplicates). So the JSON supplies
+     the postings and the RSS supplies `postedAt`, joined on the job id — the RSS
+     `<link>` is `/jobs/308423` and that number is `job.id` in the JSON (49 of 50
+     distinct ids covered on that board). This does **not** disturb Normalize's
+     response↔source pairing, which is by array index: two source entries get two
+     responses and the map stays 1:1. Localized duplicates share one `job.id`, so
+     the join lands on the underlying job, which is what a posting age is a property
+     of. `pinpoint-rss` is excluded from the "live but returning nothing" report in
+     `radar.mjs`, since contributing zero postings is its correct behaviour.
+
+     Worth doing: the dates change the answer. On the board this was built against,
+     four PM roles were 58–90 days old, so all four take the −12 stale penalty and
+     none clears 48 — one of them went 52 → 33. Without the join, a 72-day-old
+     posting is announced as though it were fresh.
+
+  **BambooHR** is the cheap one: `https://<tenant>.bamboohr.com/careers/list` is
+  public JSON with no auth and no bot protection, and `.../careers/<id>/detail` adds
+  the full JD, `datePosted` and `compensation`. Only the list is fetched, because
+  Fetch Board does one request per source — so like `workable` and `smartrecruiters`
+  these postings carry no description and no date, and score on title, department and
+  country alone. One quirk: `atsLocation.province` is often just the country
+  repeated, which rendered one city as `"Belgrade, Serbia, Serbia"`, so the location
+  parts are deduped.
+
+  For both platforms the tenant is simply the subdomain of any careers URL, and a
+  subdomain that is not a customer answers `302 text/html` — so a typo surfaces as a
+  dead board in `STATUS.md` rather than as silence.
+
   **Personio and Teamtailor were added 2026-08-20** to reach the small-EU-company
-  bracket the big-brand boards miss — the segment alago (Munich ConTech, 11 people)
+  bracket the big-brand boards miss — the segment an 11-person Munich ConTech firm
   turned up in. Both carry caveats worth knowing before adding tenants:
   Teamtailor's `jobs.json` returns only the ~10 most recent postings per board and
   ignores `?page=`, which is fine for a new-posting radar but is not a full listing;
@@ -252,7 +305,7 @@ Fix: added the non-AI keyword group and the Spain bonus. It now scores 51, and t
 the same company's other remote roles surfaced at 47.
 
 Calibration check on a live run: Hostaway "Staff PM – AI – Remote EMEA" scored
-**80** and Appfire "Senior PM – AI Governance" scored **65** — the two roles
+**80** and another board's "Senior PM – AI Governance" scored **65** — the two roles
 The roles a human would shortlist came out on top, which is the behaviour wanted.
 
 Last live run (2026-08-20, 111 sources): 9 625 postings fetched → 379 with a PM title.
@@ -345,10 +398,81 @@ curl -s -o /dev/null -w '%{http_code}\n' https://api.ashbyhq.com/posting-api/job
 curl -s 'https://api.lever.co/v0/postings/SLUG?mode=json' | head -c 200   # [] = live but empty
 curl -s -o /dev/null -w '%{http_code}\n' https://apply.workable.com/api/v1/widget/accounts/SLUG
 curl -s 'https://api.smartrecruiters.com/v1/companies/SLUG/postings?limit=1' # check totalFound > 0
+
+# Pinpoint and BambooHR: the tenant is just the subdomain of any careers URL, and a
+# non-customer subdomain answers 302/text-html, so a typo shows up as a dead board in
+# STATUS.md rather than as silence. Both report their own count, so 0 vs live is clear.
+curl -s https://SLUG.pinpointhq.com/postings.json | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))'
+curl -s https://SLUG.bamboohr.com/careers/list   | python3 -c 'import sys,json;print(json.load(sys.stdin)["meta"]["totalCount"])'
 ```
+
+### ATS platforms surveyed but not added
+
+Probed with real requests while adding BambooHR and Pinpoint. All three work; none is
+in the source list, because each needs a tenant decision rather than a code decision:
+
+| Platform | Endpoint | Verified | Cost of adding it |
+|---|---|---|---|
+| **Workday** | `POST https://<t>.wd<N>.myworkdayjobs.com/wday/cxs/<t>/<site>/jobs` body `{"searchText":"product manager","limit":20,"offset":0}` | 200, `total: 1204` on one large tenant | The big-corporate segment nothing else here reaches. But **three** unknowns per company (tenant, `wd<N>` cluster, site name), `limit` caps at 20 so it needs pagination, results are relevance-ordered not newest-first, and `postedOn` is prose (`"Posted 30+ Days Ago"`). Descriptions need a second fetch. |
+| **join.com** | `https://join.com/api/public/companies/<numericId>/jobs?page=1&pageSize=5` | 200 | Reaches the DACH-SMB bracket. Two costs: the id is numeric and comes from `__NEXT_DATA__` → `initialState.company.id` (the same ritual Getro needs), and `pageSize` is capped at **5**, so a 30-posting board is 6 requests. Carries a real `createdAt` and an ISO country code, no description. |
+| **Rippling** | `https://api.rippling.com/platform/api/ats/v1/board/<slug>/jobs` | 200, 736 postings on one tenant | Plain GET, no auth, no pagination. But title / department / `workLocation` only — no description, no date — and the customer base skews US. |
+
+Probed and **not** resolved: softgarden, Jobylon, Homerun, Breezy, Factorial, Comeet,
+Huntflow, Zoho Recruit, Careerpuck, HeyJobs. Each 404'd on a guessed tenant or path,
+which rules out the guess, not the platform — they need a known customer URL to work
+backwards from before any conclusion.
+
+## Geography scoring — read this before re-targeting
+
+Adding Pinpoint exposed that **both location lists were country-level while most
+boards write a bare city**. Measured on one 9,720-posting corpus: **4,197 (43%) had
+a location matching neither the EU nor the US pattern.** If you re-target this radar
+at your own geography, re-run that census before trusting the filter.
+
+The damage is one-sided, and it silently costs the radar its main filter:
+
+| Fix | Postings affected |
+|---|---|
+| Bare US city names now trigger the −32 US-only penalty (`US_CITY`) | **1,821** were escaping it entirely |
+| EU cities whose country was already listed now earn the +9 EU bonus | **515** were losing it |
+
+"San Francisco" alone appeared 1,082 times and scored as though its location were
+unknown, because `US_STATE` needs a `", CA"` suffix that those postings do not
+have. In the other direction `EU_WORD` listed `germany` but not `munich`, `sweden`
+but not `stockholm`, `poland` but not `warsaw`, and `\bczech\b` did not match
+`Czechia`. The city vocabulary is now the same one `COLLAPSE`'s `LOC_TAG` already
+carried.
+
+Two related bugs, both the same mistake in different clothes — **reading a place out
+of the description and treating it as an eligibility statement**:
+
+- **`ANY_WORD` was tested against location + the first 400 description chars**, so a
+  company blurb was enough. One board's "enabling sustainable growth for businesses
+  worldwide" handed its *office-bound* roles the full +16 worldwide bonus, and a
+  Prague office role the same. On a 33-posting sample, 2 of the 4 worldwide bonuses
+  awarded were phantoms and one was above threshold. Now only the location field can
+  claim it, plus a narrow `ANY_DESC` for phrasings a blurb does not produce
+  ("work from anywhere", "anywhere in the world", "fully distributed").
+- **The EU-remote bonus had the same hole, and the first fix reopened it.** An
+  initial `EU_DESC` accepted "based in Europe" anywhere in the description, which
+  promoted an **India-based** role to 54 with a "remote EU/EMEA" bonus off the
+  sentence "…teams based in Europe…". `EU_DESC` now matches only role-eligibility
+  phrasing (`remote within Europe`, `candidates must be based in Europe`,
+  `eligible to work in the EU`). Anything softer falls through to plain `remote` +7 —
+  the honest read of "the text does not say".
+
+All of the above are covered by `node test_scoring.mjs` (checks 10–16), including a
+guard that an EU city is never read as a US state code: `"Mannheim, DE"` is Delaware
+to `US_STATE`, and only `EU_WORD` winning first prevents a −32.
 
 ## Known limits
 
+- **Only EU and US geography is modelled.** The location census turned up real volume
+  in places that are neither: Canada/Toronto (~75), India/Bangalore (~150), Singapore
+  (132), Tokyo (116), Sydney/Australia (~95), Brazil/São Paulo (~70), Mexico, Seoul,
+  Lima. None is EU-eligible, but they take the plain `remote` +7 rather than a
+  penalty, because "not EU" is not the same claim as "US-only". Whether they should be
+  penalised is a policy call for whoever re-targets this — deliberately left alone.
 - **No LinkedIn.** No public jobs API; scraping breaks and risks the account.
   The ATS boards above carry the same roles, with full descriptions.
 - **Scoring is deterministic, not a judgement.** It ranks by title, geography
