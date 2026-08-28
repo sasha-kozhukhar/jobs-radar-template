@@ -41,7 +41,10 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DRY_RUN: ${{ inputs.dry_run == true && '1' || '0' }}
-          THRESHOLD: ${{ inputs.threshold || '48' }}
+          # NOTE: this fallback is what SCHEDULED runs use -- `inputs.*` is empty unless the
+          # workflow is dispatched by hand, so changing the input's `default:` alone leaves
+          # cron on the old number. Keep the two in sync.
+          THRESHOLD: ${{ inputs.threshold || '40' }}
           MAX_PER_RUN: ${{ inputs.max_per_run || '12' }}
         run: node radar.mjs
 
